@@ -117,3 +117,11 @@ $(LIBBOX64DL)/plugins/libnode:
   GOM 的 `my_*` 符号都在里面；嵌进宿主后 `dlopen(NULL)` 变成宿主可执行文件，
   `my_*` 却在我们这个 DSO 里。`box64_lib_init` 用 `dladdr` 把 `box64lib` 重绑到自身模块。
 - `core.c` 引用 `unittest()`，嵌入时不链接 `test.c`，由 `libbox64.c` 提供 stub。
+
+## 许可证
+
+MIT，见 [`LICENSE`](LICENSE)。
+
+`third_party/box64/` 是 [box64](https://github.com/ptitSeb/box64) 的 vendored 副本，
+同为 MIT，版权归 ptitSeb（见该目录下的 `LICENSE`）。本仓库对它的改动只有两行 hook，
+其余是软链与生成物。
