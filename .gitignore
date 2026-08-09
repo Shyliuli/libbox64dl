@@ -1,0 +1,23 @@
+build/
+
+# Build trees inside the vendored box64
+third_party/box64/build/
+third_party/box64/build-pic/
+third_party/box64/build-pic-dyn/
+
+# Grafted by `make graft` — symlinks and generated lists, never sources
+third_party/box64/src/libbox64.c
+third_party/box64/src/thunk.c
+third_party/box64/src/thunk_la64.S
+third_party/box64/src/include/libbox64.h
+third_party/box64/src/include/box64dl_thunk.h
+third_party/box64/src/wrapped/wrappedlibgccs.c
+third_party/box64/src/wrapped/wrappedlibgccs_private.h
+third_party/box64/src/wrapped/wrappedlibnode.c
+third_party/box64/src/wrapped/wrappedlibnode_private.h
+third_party/box64/src/library_list_extra.h
+third_party/box64/box64dl_core.cmake
+third_party/box64/box64dl_plugins.cmake
+
+# Downstream projects register plugins by symlinking their directory in
+plugins/libnode
