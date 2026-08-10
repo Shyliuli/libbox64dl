@@ -29,7 +29,26 @@ BOX64_API uint64_t box64_call_regs(void* sym, uint64_t* gregs, uint64_t* fregs);
 BOX64_API uint64_t box64_call_marshaled(void* sym, uint64_t* gregs,
                                         uint64_t* fregs, const void* stack,
                                         size_t stack_len);
+/* Host function -> guest-callable address, six integer registers forwarded. */
 BOX64_API void* box64_callback(void* host_fn, const char* fmt);
+
+/*
+ * Same, but the caller supplies the wrapper that runs on the guest's behalf:
+ *
+ *   void my_bridge(void* emu, uintptr_t host_fn);
+ *
+ * It gets the emulator handle and the host function, and moves arguments and
+ * the return value itself with the two accessors below. This is how a callback
+ * whose parameters are not all integers gets described — the default wrapper
+ * only knows how to forward six integer registers.
+ */
+BOX64_API void* box64_callback_with(void* host_fn, void* bridge_fn);
+
+/* Argument registers as the guest left them: 6 integer, 8 SSE. */
+BOX64_API void box64_bridge_args(void* emu, uint64_t* gregs, uint64_t* fregs);
+/* Return registers the guest will read: rax, rdx, xmm0, xmm1. */
+BOX64_API void box64_bridge_ret(void* emu, uint64_t rax, uint64_t rdx,
+                                const uint64_t* fregs2);
 
 #ifdef __cplusplus
 }

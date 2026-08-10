@@ -488,15 +488,53 @@ static void bridge_host6(x64emu_t* emu, uintptr_t fnc) {
   R_RAX = f(R_RDI, R_RSI, R_RDX, R_RCX, R_R8, R_R9);
 }
 
+/*
+ * Register-file access for a bridge callee, so callers can implement their own
+ * argument decoding without depending on the emulator's layout. `emu` is the
+ * opaque first parameter a bridge function receives.
+ */
+BOX64_API void box64_bridge_args(void* emuv, uint64_t* gregs, uint64_t* fregs) {
+  x64emu_t* emu = (x64emu_t*)emuv;
+  int nn[] = {_DI, _SI, _DX, _CX, _R8, _R9};
+  int i;
+  if (!emu || !gregs || !fregs) return;
+  for (i = 0; i < 6; ++i) gregs[i] = emu->regs[nn[i]].q[0];
+  for (i = 0; i < 8; ++i) memcpy(&fregs[i], &emu->xmm[i], sizeof(uint64_t));
+}
+
+BOX64_API void box64_bridge_ret(void* emuv, uint64_t rax, uint64_t rdx,
+                                const uint64_t* fregs2) {
+  x64emu_t* emu = (x64emu_t*)emuv;
+  if (!emu) return;
+  R_RAX = rax;
+  R_RDX = rdx;
+  if (fregs2) {
+    memcpy(&emu->xmm[0], &fregs2[0], sizeof(uint64_t));
+    memcpy(&emu->xmm[1], &fregs2[1], sizeof(uint64_t));
+  }
+}
+
+/* Bridge with the default six-integer-register wrapper. */
 BOX64_API void* box64_callback(void* host_fn, const char* fmt) {
-  uintptr_t br;
   (void)fmt;
+  return box64_callback_with(host_fn, (void*)bridge_host6);
+}
+
+/*
+ * Bridge `host_fn` through a caller-supplied wrapper, which receives the emu
+ * and the host function pointer and is responsible for moving arguments and
+ * the return value. Needed for callbacks whose parameters are not all
+ * integers, where the six-register default cannot describe the signature.
+ */
+BOX64_API void* box64_callback_with(void* host_fn, void* bridge_fn) {
+  uintptr_t br;
   if (!g_ready && box64_lib_init() != 0) return NULL;
-  if (!host_fn) return NULL;
+  if (!host_fn || !bridge_fn) return NULL;
   lock();
   /* Check-first: AddBridge alone allocates a fresh brick per call, so
    * re-registering the same host function would leak bridge slots. */
-  br = AddCheckBridge(my_context->system, bridge_host6, host_fn, 0, NULL);
+  br = AddCheckBridge(my_context->system, (wrapper_t)bridge_fn, host_fn, 0,
+                      NULL);
   unlock();
   return (void*)(uintptr_t)br;
 }
