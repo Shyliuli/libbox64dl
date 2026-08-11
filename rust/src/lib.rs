@@ -70,6 +70,7 @@ struct Box64Lib {
 
 static BOX64_LIB: Mutex<Option<Box64Lib>> = Mutex::new(None);
 
+//question:能否把这些接受context的函数，移动到Box64Context的impl中？
 impl Box64Lib {
     /// 在已持有 BOX64_LIB 锁的前提下，把 slot 从 None 填成 Some。
     fn init(slot: &mut Option<Self>) -> Result<()> {
@@ -89,7 +90,7 @@ impl Box64Lib {
         // 2.guest缺页:正确处理
         // 3.box64fault:正确处理
         //所以需要在init_signal_helper()中，保存host的handler并做合适的转发
-        
+
         //新建模拟器上下文
         let context = Box64Context::new()?;
 
