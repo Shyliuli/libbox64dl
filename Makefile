@@ -10,6 +10,10 @@ BUILD_STATIC := $(BOX64)/build
 BUILD_PIC := $(BOX64)/build-pic
 NPROC := $(shell nproc)
 
+# Ordered patches against the vendored tree (see patches/).
+PATCHES := $(sort $(wildcard $(ROOT)/patches/*.patch))
+PATCH_STAMP := $(BOX64)/.libbox64dl_patches_stamp
+
 # Each plugins/<name>/ supplies wrapped<lib>.c, wrapped<lib>_private.h and
 # library_list.inc. Downstream projects register by symlinking their directory
 # in here (see uninode/Makefile).
@@ -33,7 +37,7 @@ CMAKE_PIC := $(CMAKE_COMMON) -DLARCH64_DYNAREC=$(PIC_DYNAREC) \
 	-DCMAKE_C_FLAGS="-fPIC -ftls-model=global-dynamic" \
 	-DCMAKE_ASM_FLAGS="-fPIC"
 
-.PHONY: all static pic graft plugins test clean distclean
+.PHONY: all static pic patch unpatch graft plugins test clean distclean
 
 all: static pic
 
@@ -48,10 +52,55 @@ build/test_thunk: tests/test_thunk.c tests/test_thunk_shim.S src/thunk.c src/thu
 static: $(BUILD_STATIC)/libbox64.a
 pic: $(BUILD_PIC)/libbox64.a
 
+# Apply patches/ to third_party/box64 (idempotent). First build step.
+patch: $(PATCH_STAMP)
+
+$(PATCH_STAMP): $(PATCHES)
+	@set -e; \
+	if [ -z "$(PATCHES)" ]; then \
+		touch "$(PATCH_STAMP)"; \
+		exit 0; \
+	fi; \
+	cd "$(BOX64)"; \
+	for p in $(PATCHES); do \
+		echo "patch: $$(basename "$$p")"; \
+		if patch -p1 -N --dry-run -i "$$p" >/dev/null 2>&1; then \
+			patch -p1 -N -i "$$p"; \
+		elif patch -p1 -R --dry-run -i "$$p" >/dev/null 2>&1; then \
+			echo "  (already applied)"; \
+		else \
+			echo "error: cannot apply $$p" >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	cd "$(ROOT)" && sha256sum $(PATCHES) > "$(PATCH_STAMP)"
+
+# Reverse patches/ (newest first). Used by distclean.
+unpatch:
+	@set -e; \
+	if [ -z "$(PATCHES)" ]; then \
+		rm -f "$(PATCH_STAMP)"; \
+		exit 0; \
+	fi; \
+	cd "$(BOX64)"; \
+	for p in $$(printf '%s\n' $(PATCHES) | sort -r); do \
+		echo "unpatch: $$(basename "$$p")"; \
+		if patch -p1 -R --dry-run -i "$$p" >/dev/null 2>&1; then \
+			patch -p1 -R -i "$$p"; \
+		elif patch -p1 -N --dry-run -i "$$p" >/dev/null 2>&1; then \
+			echo "  (not applied)"; \
+		else \
+			echo "error: cannot reverse $$p" >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	rm -f "$(PATCH_STAMP)"
+
 # Graft our sources into the vendored tree. Everything here is a symlink or a
 # generated file, so third_party/box64 stays re-syncable with upstream; the only
 # hand-edits there are the two hook lines in library_list.h and CMakeLists.txt.
-graft:
+# Patches under patches/ are applied first via the `patch` target.
+graft: patch
 	@for f in $(ROOT)/src/*.c $(ROOT)/src/*.S; do \
 		ln -sfn "$$f" "$(BOX64)/src/$$(basename $$f)"; \
 	done
@@ -93,12 +142,12 @@ graft:
 plugins:
 	@for d in $(PLUGIN_DIRS); do echo "  $$(basename $$d) -> $$(readlink -f $$d)"; done
 
-$(BUILD_STATIC)/libbox64.a: graft
+$(BUILD_STATIC)/libbox64.a: patch graft
 	@mkdir -p $(BUILD_STATIC)
 	cd $(BUILD_STATIC) && cmake .. $(CMAKE_COMMON)
 	$(MAKE) -C $(BUILD_STATIC) libbox64 -j$(NPROC)
 
-$(BUILD_PIC)/libbox64.a: graft
+$(BUILD_PIC)/libbox64.a: patch graft
 	@mkdir -p $(BUILD_PIC)
 	cd $(BUILD_PIC) && cmake .. $(CMAKE_PIC)
 	$(MAKE) -C $(BUILD_PIC) libbox64 -j$(NPROC)
@@ -106,7 +155,7 @@ $(BUILD_PIC)/libbox64.a: graft
 clean:
 	rm -rf $(BUILD_STATIC) $(BUILD_PIC)
 
-distclean: clean
+distclean: clean unpatch
 	@for f in $(ROOT)/src/*.c $(ROOT)/src/*.S; do rm -f "$(BOX64)/src/$$(basename $$f)"; done
 	@for f in $(ROOT)/include/*.h; do rm -f "$(BOX64)/src/include/$$(basename $$f)"; done
 	rm -f $(BOX64)/src/library_list_extra.h \

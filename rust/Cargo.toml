@@ -1,0 +1,23 @@
+[package]
+name = "libbox64"
+version = "0.1.0"
+edition = "2024"
+description = "Rust facade over the embeddable box64 runtime (FFI to libbox64.a)"
+
+[lib]
+name = "libbox64"
+path = "src/lib.rs"
+crate-type = ["rlib", "staticlib"]
+
+[features]
+default = ["link-box64"]
+# Link against ../third_party/box64/build/libbox64.a (and friends).
+# Disable to type-check the Rust side alone: `cargo check --no-default-features`
+link-box64 = []
+
+[dependencies]
+anyhow = "1.0.104"
+libc = "0.2"
+
+[build-dependencies]
+cc = "1"

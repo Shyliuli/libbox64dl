@@ -154,101 +154,100 @@ static int ensure_emu(void) {
   return 0;
 }
 
-BOX64_API int box64_lib_init(void) {
-  lock();
-  if (g_ready) {
-    unlock();
-    return 0;
-  }
-  g_err[0] = 0;
-  ftrace = stderr;
-  box64_pagesize = (size_t)sysconf(_SC_PAGESIZE);
-  if (!box64_pagesize) box64_pagesize = 4096;
+// BOX64_API int box64_lib_init(void) {
+//   lock();
+//   if (g_ready) {
+//     unlock();
+//     return 0;
+//   }
+//   g_err[0] = 0;
+//   ftrace = stderr;
+//   box64_pagesize = (size_t)sysconf(_SC_PAGESIZE);
+//   if (!box64_pagesize) box64_pagesize = 4096;
 
-  LoadEnvVariables();
-  InitializeEnvFiles();
-  if (!getenv("BOX64_NOBANNER")) setenv("BOX64_NOBANNER", "1", 0);
+//   LoadEnvVariables();
+//   InitializeEnvFiles();
+//   if (!getenv("BOX64_NOBANNER")) setenv("BOX64_NOBANNER", "1", 0);
 
-  InitializeSystemInfo();
-#ifdef DYNAREC
-  if (!DetectHostCpuFeatures()) SET_BOX64ENV(dynarec, 0);
-#endif
+//   InitializeSystemInfo();
+// #ifdef DYNAREC
+//   if (!DetectHostCpuFeatures()) SET_BOX64ENV(dynarec, 0);
+// #endif
 
-  /*
-   * Deliberately NOT calling init_signal_helper().
-   *
-   * It installs box64's SIGSEGV/SIGBUS/SIGILL/SIGABRT handlers with
-   * sigaction(sig, &action, NULL) — the old handler is discarded, not chained.
-   * Inside Electron that would destroy V8's own SIGSEGV handling (write
-   * barriers, WASM traps), so the host keeps its handlers and box64 installs
-   * none.
-   *
-   * Safe today because dynarec's write protection is a no-op for these guests:
-   * protectDB() clears PROT_WRITE on pages holding translated code, but guest
-   * .text is already r-x (no addon ships an RWE segment), so no fault can be
-   * raised that box64 would have to service. Measured across a full merkle
-   * index: zero mappings went from writable to read-only.
-   *
-   * It stops being safe for a guest with an RWE segment, one that mprotects its
-   * own code writable at run time, or one that genuinely self-modifies. The fix
-   * then is either CRC-based block validation (PROT_NEVERCLEAN / always_test,
-   * no signals involved) or an embedded signal helper that saves the host
-   * handlers and forwards anything box64 does not recognise.
-   */
+//   /*
+//    * Deliberately NOT calling init_signal_helper().
+//    *
+//    * It installs box64's SIGSEGV/SIGBUS/SIGILL/SIGABRT handlers with
+//    * sigaction(sig, &action, NULL) — the old handler is discarded, not chained.
+//    * Inside Electron that would destroy V8's own SIGSEGV handling (write
+//    * barriers, WASM traps), so the host keeps its handlers and box64 installs
+//    * none.
+//    *
+//    * Safe today because dynarec's write protection is a no-op for these guests:
+//    * protectDB() clears PROT_WRITE on pages holding translated code, but guest
+//    * .text is already r-x (no addon ships an RWE segment), so no fault can be
+//    * raised that box64 would have to service. Measured across a full merkle
+//    * index: zero mappings went from writable to read-only.
+//    *
+//    * It stops being safe for a guest with an RWE segment, one that mprotects its
+//    * own code writable at run time, or one that genuinely self-modifies. The fix
+//    * then is either CRC-based block validation (PROT_NEVERCLEAN / always_test,
+//    * no signals involved) or an embedded signal helper that saves the host
+//    * handlers and forwards anything box64 does not recognise.
+//    */
 
-  my_context = NewBox64Context(1);
-  if (!my_context) {
-    set_err("NewBox64Context failed");
-    unlock();
-    return -1;
-  }
+//   my_context = NewBox64Context(1);
+//   if (!my_context) {
+//     set_err("NewBox64Context failed");
+//     unlock();
+//     return -1;
+//   }
 
-  /*
-   * NewBox64Context sets box64lib = dlopen(NULL), which is the host Node/Electron
-   * executable when we are embedded in a .node addon. GOM my_* symbols live in
-   * the addon DSO — rebind box64lib to the module that contains box64_lib_init.
-   */
-  {
-    Dl_info dli;
-    if (dladdr((void*)&box64_lib_init, &dli) && dli.dli_fname) {
-      void* self = dlopen(dli.dli_fname, RTLD_NOW | RTLD_GLOBAL);
-      if (self) my_context->box64lib = self;
-    }
-  }
+//   /*
+//    * NewBox64Context sets box64lib = dlopen(NULL), which is the host Node/Electron
+//    * executable when we are embedded in a .node addon. GOM my_* symbols live in
+//    * the addon DSO — rebind box64lib to the module that contains box64_lib_init.
+//    */
+//   {
+//     Dl_info dli;
+//     if (dladdr((void*)&box64_lib_init, &dli) && dli.dli_fname) {
+//       void* self = dlopen(dli.dli_fname, RTLD_NOW | RTLD_GLOBAL);
+//       if (self) my_context->box64lib = self;
+//     }
+//   }
 
-  prepare_lib_paths(my_context);
+//   prepare_lib_paths(my_context);
+  
+//   my_context->box64path = box_realpath("/proc/self/exe", NULL);
+//   if (!my_context->box64path) my_context->box64path = box_strdup("libbox64");
+//   my_context->argv[0] = box_strdup("libbox64");
+//   my_context->fullpath = box_strdup(my_context->argv[0]);
+//   my_context->envc = 0;
+//   my_context->envv = (char**)box_calloc(1, sizeof(char*));
+//   my_context->ep = my_context->exit_bridge;
 
-  my_context->box64path = box_realpath("/proc/self/exe", NULL);
-  if (!my_context->box64path) my_context->box64path = box_strdup("libbox64");
-  my_context->argv[0] = box_strdup("libbox64");
-  my_context->fullpath = box_strdup(my_context->argv[0]);
-  my_context->envc = 0;
-  my_context->envv = (char**)box_calloc(1, sizeof(char*));
+//   loadProtectionFromMap();
 
-  init_pthread_helper();
-  loadProtectionFromMap();
+//   if (CalcStackSize(my_context)) {
+//     set_err("stack alloc failed");
+//     FreeBox64Context(&my_context);
+//     unlock();
+//     return -1;
+//   }
 
-  if (CalcStackSize(my_context)) {
-    set_err("stack alloc failed");
-    FreeBox64Context(&my_context);
-    unlock();
-    return -1;
-  }
+//   if (ensure_emu() != 0) {
+//     FreeBox64Context(&my_context);
+//     unlock();
+//     return -1;
+//   }
 
-  my_context->ep = my_context->exit_bridge;
-  if (ensure_emu() != 0) {
-    FreeBox64Context(&my_context);
-    unlock();
-    return -1;
-  }
+//   setupTraceInit();
+//   setupTrace();
 
-  setupTraceInit();
-  setupTrace();
-
-  g_ready = 1;
-  unlock();
-  return 0;
-}
+//   g_ready = 1;
+//   unlock();
+//   return 0;
+// }
 
 BOX64_API void box64_lib_fini(void) {
   lock();
@@ -266,7 +265,7 @@ BOX64_API int box64_lib_ready(void) { return g_ready; }
 
 BOX64_API void* box64_dlopen(const char* path, int flags) {
   x64emu_t* emu;
-  void* h;
+  void* handle;
   char buf[4096];
   const char* abs = path;
   if (!g_ready && box64_lib_init() != 0) return NULL;
@@ -282,15 +281,15 @@ BOX64_API void* box64_dlopen(const char* path, int flags) {
   emu = thread_get_emu();
   if (path[0] != '/' && realpath(path, buf)) abs = buf;
   if (flags == 0) flags = RTLD_NOW;
-  h = my_dlopen(emu, (void*)abs, flags);
-  if (!h) {
+  handle = my_dlopen(emu, (void*)abs, flags);
+  if (!handle) {
     char* e = my_dlerror(emu);
     set_err(e ? e : "box64_dlopen failed");
   } else {
     set_err(NULL);
   }
   unlock();
-  return h;
+  return handle;
 }
 
 BOX64_API void* box64_dlsym(void* handle, const char* name) {
