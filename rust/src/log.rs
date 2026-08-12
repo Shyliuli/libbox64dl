@@ -8,12 +8,12 @@ pub fn ftrace_print(msg: &str) {
     }
 }
 
+#[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {
         $crate::log::ftrace_print(&format!($($arg)*))
     };
 }
-pub use log;
 
 pub fn init_log() {
     env::init_env();

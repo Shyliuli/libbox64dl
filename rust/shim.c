@@ -1,8 +1,16 @@
+#define _GNU_SOURCE
+#include <dlfcn.h>
+
 #include "box64context.h"
+#include "debug.h"
 #include "env.h"
 #include "hostext.h"
-#include <dlfcn.h>
+#include "sysinfo.h"
+
 extern box64env_t box64env;
+
+void setupTraceInit(void);
+void setupTrace(void);
 
 void init_dynarec_host_check(void) {
 #ifdef DYNAREC
@@ -34,8 +42,8 @@ int rebind_box64lib(box64context_t *my_context, const void *box64_fn) {
         my_context->box64lib = self;
         ret = 0;
     }
-}
-return ret;
+  }
+  return ret;
 }
 
 void init_guest(box64context_t *my_context) {

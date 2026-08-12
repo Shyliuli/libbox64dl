@@ -18,6 +18,7 @@ unsafe extern "C" {
     pub unsafe fn PrintfFtrace(prefix: i32, fmt: *const libc::c_char, ...);
     
     pub unsafe fn InitializeSystemInfo();
+    pub unsafe fn init_sysinfo();
     pub unsafe fn init_dynarec_host_check();
     #[link_name = "init_box64_trace"]
     pub unsafe fn c_init_box64_trace();
@@ -25,15 +26,15 @@ unsafe extern "C" {
 
     pub unsafe fn Box64Context_new() -> *mut c_box64_ctx;
     pub unsafe fn FreeBox64Context(context: *mut *mut c_box64_ctx);
-    
+
     pub unsafe fn loadProtectionFromMap();
-    
+
     #[link_name = "rebind_box64lib"]
     pub unsafe fn c_rebind_box64lib(
         my_context: *mut c_box64_ctx,
         box64_fn: *const c_void,
     ) -> i32;
-    
+
     #[link_name = "CalcStackSize"]
     pub unsafe fn c_CalcStackSize(context: *mut c_box64_ctx) -> i32;
 

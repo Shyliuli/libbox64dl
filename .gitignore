@@ -18,6 +18,7 @@ third_party/box64/src/wrapped/wrappedlibnode_private.h
 third_party/box64/src/library_list_extra.h
 third_party/box64/box64dl_core.cmake
 third_party/box64/box64dl_plugins.cmake
+third_party/box64/.libbox64dl_patches_stamp
 
 # Downstream projects register plugins by symlinking their directory in
 plugins/libnode

@@ -7,9 +7,9 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Mutex;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use c_box64::*;
-use log::{init_log, log};
+use log::init_log;
 use page_size::init_pagesize;
 
 struct GlobalError {
@@ -38,6 +38,12 @@ struct Box64Context {
     //非零指针
     my_context: NonNull<c_box64_ctx>,
 }
+
+// NonNull 默认 !Send；我们把它放进 Mutex，跨线程移交指针本身没问题。
+// 与 C 侧一致：全局 my_context + 大锁串行化 API（libbox64.c 的 g_lock）。
+// Safety: 所有通过 Box64Lib 碰 context 的路径都持 BOX64_LIB 锁。
+// 注意：C 内部仍会直接读全局 my_context，那部分不归这把锁管——和纯 C 嵌入时一样。
+unsafe impl Send for Box64Context {}
 
 impl Box64Context {
     pub fn new() -> Result<Self> {
@@ -78,9 +84,12 @@ impl Box64Lib {
             return Ok(());
         }
 
-        init_log();
         init_pagesize();
-        init_sysinfo();
+        init_log();
+        unsafe {
+            init_sysinfo();
+            init_dynarec_host_check();
+        }
 
         //TODO: 在实现嵌入式singal处理，正确处理signal并转发给host/guest
         //Box64Context::new() 内部会调用 init_signal_helper()
@@ -97,17 +106,17 @@ impl Box64Lib {
         // 在node场景下，符号在.so/.node里;但是dlopen(NULL) 会返回host Node/Electron可执行文件
         // 所以需要将box64lib重新绑定到包含 box64_lib_init 的模块
         rebind_box64lib(context.as_ptr(), box64_lib_init as *const c_void)?;
-        
-        unsafe{
-        //初始化guest环境
-        guest_init(context.as_ptr());
-        //加载当前进程的映射地址和权限到box64
-        loadProtectionFromMap();
+
+        unsafe {
+            //初始化guest环境
+            init_guest(context.as_ptr());
+            //加载当前进程的映射地址和权限到box64
+            loadProtectionFromMap();
         }
         //初始化栈
-        init_stack(context.as_ptr)?;
+        init_stack(context.as_ptr())?;
         //准备emu实例(有防重入)
-        ensure_emu(context)?;
+        ensure_emu()?;
         //初始化box64 trace
         init_box64_trace();
 
@@ -118,15 +127,23 @@ impl Box64Lib {
         });
         Ok(())
     }
-
 }
-fn ensure_emu(context: Box64Context) -> Result<()> {
-    //先用C的确保emu存在
-    if unsafe{ensure_emu(context.as_ptr())} !=0{
+
+// 临时：先调 C 的！以后改成 Rust 实现并删掉此声明。
+// 走 C 侧导出的 box64_ensure_emu，避免依赖 static 符号。
+unsafe extern "C" {
+    #[link_name = "box64_ensure_emu"]
+    fn c_ensure_emu() -> i32;
+}
+
+/// init 走这个包装；内部暂时转调 C。
+fn ensure_emu() -> Result<()> {
+    if unsafe { c_ensure_emu() } != 0 {
         bail!("Failed to initialize emulator");
     }
     Ok(())
 }
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn box64_lib_init() -> i32 {
     let mut guard = match BOX64_LIB.lock() {
@@ -148,5 +165,9 @@ pub unsafe extern "C" fn box64_lib_init() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-//先调C的！
-pub unsafe extern "C" fn ensure_emu() -> i32;
+pub unsafe extern "C" fn box64_is_ready() -> i32 {
+    match BOX64_LIB.lock() {
+        Ok(guard) => i32::from(guard.is_some()),
+        Err(_) => 0,
+    }
+}

@@ -65,7 +65,6 @@ void* my_dlsym(x64emu_t* emu, void* handle, void* symbol);
 int my_dlclose(x64emu_t* emu, void* handle);
 char* my_dlerror(x64emu_t* emu);
 
-static int g_ready;
 static char g_err[512];
 static pthread_mutex_t g_lock;
 static pthread_once_t g_lock_once = PTHREAD_ONCE_INIT;
@@ -152,6 +151,13 @@ static int ensure_emu(void) {
   refreshTLSData(emu);
   thread_set_emu(emu);
   return 0;
+}
+
+BOX64_API int box64_ensure_emu(void) {
+  lock();
+  int rc = ensure_emu();
+  unlock();
+  return rc;
 }
 
 // BOX64_API int box64_lib_init(void) {
@@ -251,24 +257,23 @@ static int ensure_emu(void) {
 
 BOX64_API void box64_lib_fini(void) {
   lock();
-  if (!g_ready) {
+  if (!box64_is_ready()) {
     unlock();
     return;
   }
   endBox64();
   my_context = NULL;
-  g_ready = 0;
   unlock();
 }
 
-BOX64_API int box64_lib_ready(void) { return g_ready; }
+BOX64_API int box64_lib_ready(void) { return box64_is_ready(); }
 
 BOX64_API void* box64_dlopen(const char* path, int flags) {
   x64emu_t* emu;
   void* handle;
   char buf[4096];
   const char* abs = path;
-  if (!g_ready && box64_lib_init() != 0) return NULL;
+  if (!box64_is_ready() && box64_lib_init() != 0) return NULL;
   if (!path) {
     set_err("box64_dlopen: NULL path");
     return NULL;
@@ -295,7 +300,7 @@ BOX64_API void* box64_dlopen(const char* path, int flags) {
 BOX64_API void* box64_dlsym(void* handle, const char* name) {
   x64emu_t* emu;
   void* p;
-  if (!g_ready) {
+  if (!box64_is_ready()) {
     set_err("not initialized");
     return NULL;
   }
@@ -324,7 +329,7 @@ BOX64_API int box64_dlclose(void* handle) {
   x64emu_t* emu;
   int rc;
   uintptr_t lo = 0, hi = 0;
-  if (!g_ready) return -1;
+  if (!box64_is_ready()) return -1;
   lock();
   if (ensure_emu() != 0) {
     unlock();
@@ -359,7 +364,7 @@ BOX64_API const char* box64_dlerror(void) { return g_err[0] ? g_err : NULL; }
 BOX64_API uint64_t box64_call(void* sym, const char* fmt, ...) {
   va_list ap;
   uint64_t ret = 0;
-  if (!g_ready || !sym) return 0;
+  if (!box64_is_ready() || !sym) return 0;
   lock();
   if (ensure_emu() != 0) {
     unlock();
@@ -408,7 +413,7 @@ BOX64_API uint64_t box64_call_regs(void* sym, uint64_t* gregs, uint64_t* fregs) 
   int nn[] = {_DI, _SI, _DX, _CX, _R8, _R9};
   int i;
   uint64_t ret;
-  if (!g_ready || !sym || !gregs || !fregs) return 0;
+  if (!box64_is_ready() || !sym || !gregs || !fregs) return 0;
   lock();
   if (ensure_emu() != 0) {
     unlock();
@@ -440,7 +445,7 @@ BOX64_API uint64_t box64_call_marshaled(void* sym, uint64_t* gregs,
   uint64_t ret;
   uintptr_t oldip;
   size_t al;
-  if (!g_ready || !sym || !gregs || !fregs) return 0;
+  if (!box64_is_ready() || !sym || !gregs || !fregs) return 0;
   lock();
   if (ensure_emu() != 0) {
     unlock();
@@ -527,7 +532,7 @@ BOX64_API void* box64_callback(void* host_fn, const char* fmt) {
  */
 BOX64_API void* box64_callback_with(void* host_fn, void* bridge_fn) {
   uintptr_t br;
-  if (!g_ready && box64_lib_init() != 0) return NULL;
+  if (!box64_is_ready() && box64_lib_init() != 0) return NULL;
   if (!host_fn || !bridge_fn) return NULL;
   lock();
   /* Check-first: AddBridge alone allocates a fresh brick per call, so

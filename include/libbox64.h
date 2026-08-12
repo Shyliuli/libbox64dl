@@ -16,6 +16,12 @@ extern "C" {
 BOX64_API int box64_lib_init(void);
 BOX64_API void box64_lib_fini(void);
 BOX64_API int box64_lib_ready(void);
+/* Rust facade owns the ready state: returns whether its BOX64_LIB Option is
+ * Some. C API guards (dlsym/dlclose/call) use this instead of a C-side flag. */
+BOX64_API int box64_is_ready(void);
+/* Ensure the current thread has a properly sized guest emu (8 MiB stack),
+ * instead of box64's 256 KiB fallback used by RunFunctionFmt. */
+BOX64_API int box64_ensure_emu(void);
 
 BOX64_API void* box64_dlopen(const char* path, int flags);
 BOX64_API void* box64_dlsym(void* handle, const char* name);

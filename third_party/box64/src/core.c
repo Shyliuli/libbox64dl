@@ -97,7 +97,7 @@ char* ftrace_name = NULL;
 int ftrace_opened = 0;
 
 
-static void openFTrace(void)
+void openFTrace(void)
 {
     const char* p = BOX64ENV(trace_file);
     #ifndef MAX_PATH

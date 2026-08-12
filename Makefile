@@ -37,13 +37,22 @@ CMAKE_PIC := $(CMAKE_COMMON) -DLARCH64_DYNAREC=$(PIC_DYNAREC) \
 	-DCMAKE_C_FLAGS="-fPIC -ftls-model=global-dynamic" \
 	-DCMAKE_ASM_FLAGS="-fPIC"
 
-.PHONY: all static pic patch unpatch graft plugins test clean distclean
+.PHONY: all static pic patch unpatch graft plugins test clean distclean rust rust-static rust-pic
 
 all: static pic
 
 # The thunk pool is self-contained, so it tests without building box64.
 test: build/test_thunk
 	./build/test_thunk
+
+# Rust facade. build.rs decides the flavor itself (feature/env), so these
+# targets only ensure the matching box64 archive is up to date first. Each
+# flavor keeps its own cargo target dir so both artifacts can coexist.
+rust: rust-static
+rust-static: $(BUILD_STATIC)/libbox64.a
+	cd rust && CARGO_TARGET_DIR=target/static cargo build
+rust-pic: $(BUILD_PIC)/libbox64.a
+	cd rust && CARGO_TARGET_DIR=target/pic LIBBOX64_FLAVOR=pic cargo build
 
 build/test_thunk: tests/test_thunk.c tests/test_thunk_shim.S src/thunk.c src/thunk_la64.S
 	@mkdir -p build

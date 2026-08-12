@@ -1,1 +1,1 @@
-#define GITREV ""
+#define GITREV "7b7e297"
