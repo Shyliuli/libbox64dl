@@ -17,7 +17,7 @@ struct GlobalError {
 }
 
 impl GlobalError {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { err: String::new() }
     }
     pub fn set_err(&mut self, msg: &str) {
@@ -58,6 +58,23 @@ impl Box64Context {
     pub fn as_ptr(&self) -> *mut c_box64_ctx {
         self.my_context.as_ptr()
     }
+    /// 在node场景下，符号在.so/.node里;但是dlopen(NULL) 会返回host Node/Electron可执行文件
+    /// 所以需要将box64lib重新绑定到包含 box64_lib_init 的模块
+    pub fn rebind(&self) -> Result<()> {
+        let ret = unsafe { c_rebind_box64lib(self.as_ptr(), box64_lib_init as *const c_void) };
+        if ret != 0 {
+            bail!("rebind_box64lib failed");
+        }
+        Ok(())
+    }
+    pub fn init_guest(&self) -> Result<()> {
+        unsafe { c_init_guest(self.as_ptr()) };
+        Ok(())
+    }
+    pub fn init_stack(&self) -> Result<()> {
+        unsafe { c_init_stack(self.as_ptr()) };
+        Ok(())
+    }
 }
 
 impl Drop for Box64Context {
@@ -69,18 +86,26 @@ impl Drop for Box64Context {
         }
     }
 }
-struct Box64Lib {
+
+
+//C全局变量
+//err:g_err
+//ctx:my_context
+//ctx(None):g_ready
+struct Global {
     err: GlobalError,
-    context: Box64Context,
+    ctx: Option<Box64Context>,
 }
 
-static BOX64_LIB: Mutex<Option<Box64Lib>> = Mutex::new(None);
+static GLOBAL: Mutex<Global> = Mutex::new(Global {
+    err: GlobalError::new(),
+    ctx: None,
+});
 
-//question:能否把这些接受context的函数，移动到Box64Context的impl中？
-impl Box64Lib {
-    /// 在已持有 BOX64_LIB 锁的前提下，把 slot 从 None 填成 Some。
-    fn init(slot: &mut Option<Self>) -> Result<()> {
-        if slot.is_some() {
+impl Global {
+    /// 在已持有 GLOBAL 锁的前提下填充 g.lib。
+    fn init(g: &mut Global) -> Result<()> {
+        if g.ctx.is_some() {
             return Ok(());
         }
 
@@ -103,61 +128,72 @@ impl Box64Lib {
         //新建模拟器上下文
         let context = Box64Context::new()?;
 
-        // 在node场景下，符号在.so/.node里;但是dlopen(NULL) 会返回host Node/Electron可执行文件
-        // 所以需要将box64lib重新绑定到包含 box64_lib_init 的模块
-        rebind_box64lib(context.as_ptr(), box64_lib_init as *const c_void)?;
-
+        // 重新绑定box64lib到正确的模块(而非host)
+        context.rebind()?;
+        // 初始化guest环境
+        context.init_guest()?;
         unsafe {
-            //初始化guest环境
-            init_guest(context.as_ptr());
             //加载当前进程的映射地址和权限到box64
             loadProtectionFromMap();
         }
         //初始化栈
-        init_stack(context.as_ptr())?;
+        context.init_stack()?;
         //准备emu实例(有防重入)
-        ensure_emu()?;
+        X64Emu::ensure_current()?;
         //初始化box64 trace
         init_box64_trace();
-
         //设置全局变量
-        *slot = Some(Self {
-            err: GlobalError::new(),
-            context,
-        });
+        g.ctx = Some(context);
         Ok(())
     }
 }
 
-// 临时：先调 C 的！以后改成 Rust 实现并删掉此声明。
-// 走 C 侧导出的 box64_ensure_emu，避免依赖 static 符号。
-unsafe extern "C" {
-    #[link_name = "box64_ensure_emu"]
-    fn c_ensure_emu() -> i32;
+//线程不安全，每个线程独占
+#[derive(Clone, Copy)]
+struct X64Emu(NonNull<c_x64emu_t>);
+impl X64Emu{
+    pub fn new( context: &Box64Context) -> Result<Self> {
+
+    }
+    /// 当前线程的 emu;尚未进入模拟器则 None。绝不触发创建。
+    pub fn current() -> Option<Self> {
+        //检查当前线程是否已经有一个emu
+        if unsafe { c_thread_get_et() }.is_null() {
+            return None;
+        }
+        NonNull::new(unsafe { c_thread_get_emu() }).map(Self)
+    }
+    //如果当前线程没有emu，则创建一个
+    pub fn ensure_current() -> Result<Self> {
+        //快速路径：检查emu是否已经存在
+        if let Some(emu) = Self::current() {
+            return Ok(emu);
+        }
+        //慢路径：创建emu
+        X64Emu::new()
+    }
+    pub fn as_ptr(&self) -> *mut c_x64emu_t {
+        self.0.as_ptr()
+    }
 }
 
-/// init 走这个包装；内部暂时转调 C。
-fn ensure_emu() -> Result<()> {
-    if unsafe { c_ensure_emu() } != 0 {
-        bail!("Failed to initialize emulator");
-    }
-    Ok(())
-}
+
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn box64_lib_init() -> i32 {
-    let mut guard = match BOX64_LIB.lock() {
+    let mut guard = match GLOBAL.lock() {
         Ok(guard) => guard,
         Err(e) => {
-            log!("Failed to lock BOX64_LIB: {}", e);
+            log!("Failed to lock GLOBAL: {}", e);
             return -1;
         }
     };
 
-    match Box64Lib::init(&mut guard) {
+    match Global::init(&mut guard) {
         Ok(()) => 0,
         Err(err) => {
-            // slot 仍是 None，没有 GlobalError 字段可写
+            //设置错误
+            guard.err.set_err(&err.to_string());
             log!("Failed to initialize box64: {:?}", err);
             -1
         }
@@ -166,8 +202,22 @@ pub unsafe extern "C" fn box64_lib_init() -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn box64_is_ready() -> i32 {
-    match BOX64_LIB.lock() {
-        Ok(guard) => i32::from(guard.is_some()),
+    match GLOBAL.lock() {
+        Ok(guard) => i32::from(guard.lib.is_some()),
         Err(_) => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ensure_emu() -> i32 {
+    match X64Emu::ensure_current() {
+        Ok(_) => 0,
+        Err(e) => {
+            log!("ensure_emu failed: {}", e);
+            if let Ok(mut g) = GLOBAL.lock() {
+                g.err.set_err(&e.to_string());
+            }
+            -1
+        }
     }
 }

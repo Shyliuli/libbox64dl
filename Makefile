@@ -20,6 +20,7 @@ PATCH_STAMP := $(BOX64)/.libbox64dl_patches_stamp
 PLUGIN_DIRS := $(wildcard $(ROOT)/plugins/*)
 
 CMAKE_COMMON := -DLARCH64=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+	-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
 	-DNOLOADADDR=ON -DNO_CONF_INSTALL=ON -DNO_LIB_INSTALL=ON
 
 # Dynarec does work inside a shared object. The old blocker was TLS_LE

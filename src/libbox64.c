@@ -1,5 +1,6 @@
 /* Embeddable box64 runtime — no main()/initialize() process takeover. */
 #define _GNU_SOURCE
+#include <assert.h>
 #include "libbox64.h"
 
 /* core.c::initialize references unittest(); provide a stub so libbox64
@@ -100,7 +101,6 @@ static void prepare_lib_paths(box64context_t* ctx) {
   AddPath("libunwind.so.8", &ctx->box64_emulated_libs, 0);
 }
 
-static int g_ctx_stack_taken;
 
 /*
  * One emu per thread, each with its own guest stack.
@@ -115,20 +115,15 @@ static int ensure_emu(void) {
   uintptr_t stack;
   size_t stacksz;
   int own_stack;
-  if (!my_context) return -1;
-  if (thread_get_et()) return 0;
 
-  if (!my_context->stack && CalcStackSize(my_context)) {
-    set_err("CalcStackSize failed");
-    return -1;
-  }
-  stacksz = my_context->stacksz ? my_context->stacksz : (8u << 20);
+  //没有初始化context
+  if (my_context == NULL) return -1;
+  //已经初始化过,直接返回
+  if (thread_get_et()!= NULL) return 0;
 
-  if (!g_ctx_stack_taken && my_context->stack) {
-    stack = (uintptr_t)my_context->stack;
-    own_stack = 0;
-    g_ctx_stack_taken = 1;
-  } else {
+  assert(my_context->stacksz!=0);
+  stacksz=my_context->stacksz;
+
     void* p = InternalMmap(NULL, stacksz, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0);
     if (p == MAP_FAILED) {
@@ -138,7 +133,7 @@ static int ensure_emu(void) {
     setProtection_stack((uintptr_t)p, stacksz, PROT_READ | PROT_WRITE);
     stack = (uintptr_t)p;
     own_stack = 1;
-  }
+
 
   emu = NewX64Emu(my_context,
                   my_context->ep ? my_context->ep : my_context->exit_bridge,

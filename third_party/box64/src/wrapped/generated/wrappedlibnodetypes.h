@@ -11,6 +11,8 @@
 #define ADDED_FUNCTIONS() 
 #endif
 
+typedef void (*vFpp_t)(void*, void*);
+typedef int32_t (*iFpip_t)(void*, int32_t, void*);
 typedef int32_t (*iFppp_t)(void*, void*, void*);
 typedef int32_t (*iFppLp_t)(void*, void*, uintptr_t, void*);
 typedef int32_t (*iFpppp_t)(void*, void*, void*, void*);
@@ -23,6 +25,8 @@ typedef int32_t (*iFppLppLpp_t)(void*, void*, uintptr_t, void*, void*, uintptr_t
 typedef int32_t (*iFppppLLppppp_t)(void*, void*, void*, void*, uintptr_t, uintptr_t, void*, void*, void*, void*, void*);
 
 #define SUPER() ADDED_FUNCTIONS() \
+	GO(uv_close, vFpp_t) \
+	GO(uv_poll_start, iFpip_t) \
 	GO(napi_add_env_cleanup_hook, iFppp_t) \
 	GO(napi_remove_env_cleanup_hook, iFppp_t) \
 	GO(napi_define_properties, iFppLp_t) \

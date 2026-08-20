@@ -1,10 +1,14 @@
-use anyhow::{bail, Result};
 use libc::FILE;
 use std::ffi::c_void;
 
 /// 对应 C 的 box64context_t
 #[repr(C)]
 pub struct c_box64_ctx {
+    _opaque: [u8; 0],
+}
+// 对应 C 的 x64emu_t
+#[repr(C)]
+pub struct c_x64emu_t{
     _opaque: [u8; 0],
 }
 
@@ -22,7 +26,10 @@ unsafe extern "C" {
     pub unsafe fn init_dynarec_host_check();
     #[link_name = "init_box64_trace"]
     pub unsafe fn c_init_box64_trace();
-    pub unsafe fn init_guest(context: *mut c_box64_ctx);
+    #[link_name = "init_guest"]
+    pub unsafe fn c_init_guest(context: *mut c_box64_ctx);
+    #[link_name = "init_stack"]
+    pub unsafe fn c_init_stack(context: *mut c_box64_ctx);
 
     pub unsafe fn Box64Context_new() -> *mut c_box64_ctx;
     pub unsafe fn FreeBox64Context(context: *mut *mut c_box64_ctx);
@@ -38,6 +45,14 @@ unsafe extern "C" {
     #[link_name = "CalcStackSize"]
     pub unsafe fn c_CalcStackSize(context: *mut c_box64_ctx) -> i32;
 
+    // threads.c — thread_get_et 只探测当前线程是否已有 et,绝不创建。
+    // 不要拿 thread_get_emu 当探测用:无 et 时它会自动创建 256KiB 栈的
+    // fallback emu 装进 TLS,之后大栈 emu 就再也装不进去了。
+    #[link_name = "thread_get_et"]
+    pub unsafe fn c_thread_get_et() -> *mut c_void; // emuthread_t*,仅用于判空
+    #[link_name = "thread_get_emu"]
+    pub unsafe fn c_thread_get_emu() -> *mut c_x64emu_t;
+
     pub static mut ftrace: *mut FILE;
     pub static mut stderr: *mut FILE;
 
@@ -45,23 +60,6 @@ unsafe extern "C" {
     pub static mut box64_pagesize: usize;
 }
 
-pub fn rebind_box64lib(my_context: *mut c_box64_ctx, box64_fn: *const c_void) -> Result<()> {
-    // Safety: my_context 来自 NewBox64Context；box64_fn 为本 so 内函数地址
-    let ret = unsafe { c_rebind_box64lib(my_context, box64_fn) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        bail!("Failed to rebind box64lib");
-    }
-}
-pub fn init_stack(my_context: *mut c_box64_ctx) -> Result<()> {
-    let ret = unsafe { c_CalcStackSize(my_context) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        bail!("Failed to initialize stack");
-    }
-}
 pub fn init_box64_trace() {
     unsafe { c_init_box64_trace() };
 }

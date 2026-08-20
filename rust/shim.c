@@ -5,7 +5,10 @@
 #include "debug.h"
 #include "env.h"
 #include "hostext.h"
+#include "pathcoll.h"
 #include "sysinfo.h"
+
+void LoadLDPath(box64context_t* context);
 
 extern box64env_t box64env;
 
@@ -57,6 +60,20 @@ void init_guest(box64context_t *my_context) {
   //设置入口点，由于这里是libbox64dl
   //lib哪里来的入口点呢？所以这里设置为exit_bridge
   my_context->ep = my_context->exit_bridge;
+
+  // Embedded init used to skip this. Without it, box64_ld_lib is empty and
+  // guest DT_NEEDED like libstdc++.so.6 cannot be found (no wrapper → must
+  // emulate the x86_64 .so from BOX64_LD_LIBRARY_PATH / box64-x86_64 paths).
+  LoadLDPath(my_context);
+  AddPath(".", &my_context->box64_ld_lib, 1);
+
+  // Host libgcc_s is LoongArch; x86_64 libstdc++ needs guest quad-math /
+  // unwind symbols (__getf2, _Unwind_Resume_or_Rethrow, ...).
+  AddPath("libgcc_s.so.1", &my_context->box64_emulated_libs, 0);
+  AddPath("libstdc++.so.6", &my_context->box64_emulated_libs, 0);
+  AddPath("libunwind.so.8", &my_context->box64_emulated_libs, 0);
+  if (BOX64ENV(emulated_libs))
+    ParseList(BOX64ENV(emulated_libs), &my_context->box64_emulated_libs, 0);
 }
 void init_box64_trace(){
   setupTraceInit();
@@ -64,4 +81,10 @@ void init_box64_trace(){
 }
 void init_sysinfo(){
     InitializeSystemInfo();
+}
+
+void init_stack(box64context_t *my_context){
+  if(my_context->stacksz==0){
+    my_context->stacksz=8*1024*1024;
+  }
 }

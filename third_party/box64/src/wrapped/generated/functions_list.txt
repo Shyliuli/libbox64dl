@@ -6213,6 +6213,10 @@ wrappedlibnettle8:
 - iFppLpLpLLpp:
   - nettle_ccm_decrypt_message
 wrappedlibnode:
+- vFpp:
+  - uv_close
+- iFpip:
+  - uv_poll_start
 - iFppp:
   - napi_add_env_cleanup_hook
   - napi_remove_env_cleanup_hook
