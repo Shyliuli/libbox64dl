@@ -88,3 +88,7 @@ void init_stack(box64context_t *my_context){
     my_context->stacksz=8*1024*1024;
   }
 }
+
+void context_stack_size(box64context_t *my_context){
+  return my_context->stacksz;
+}

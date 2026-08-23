@@ -30,7 +30,9 @@ unsafe extern "C" {
     pub unsafe fn c_init_guest(context: *mut c_box64_ctx);
     #[link_name = "init_stack"]
     pub unsafe fn c_init_stack(context: *mut c_box64_ctx);
-
+    #[link_name = "context_stack_size"]
+    pub unsafe fn c_context_stack_size(context: *mut c_box64_ctx) -> usize;
+    
     pub unsafe fn Box64Context_new() -> *mut c_box64_ctx;
     pub unsafe fn FreeBox64Context(context: *mut *mut c_box64_ctx);
 

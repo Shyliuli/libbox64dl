@@ -75,6 +75,9 @@ impl Box64Context {
         unsafe { c_init_stack(self.as_ptr()) };
         Ok(())
     }
+    pub fn stack_size(&self) -> usize {
+        unsafe { c_context_stack_size(self.as_ptr()) }
+    }
 }
 
 impl Drop for Box64Context {
@@ -138,24 +141,42 @@ impl Global {
         }
         //初始化栈
         context.init_stack()?;
-        //准备emu实例(有防重入)
-        X64Emu::ensure_current()?;
+
         //初始化box64 trace
         init_box64_trace();
         //设置全局变量
         g.ctx = Some(context);
         Ok(())
     }
+    fn is_ready(&self) -> bool {
+        self.ctx.is_some()
+    }
+    fn context(&self) -> Option<&Box64Context> {
+        self.ctx.as_ref()
+    }
+    fn require_context(&self) -> Result<&Box64Context> {
+        self.ctx
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("context is not ready"))
+    }
 }
 
 //线程不安全，每个线程独占
 #[derive(Clone, Copy)]
 struct X64Emu(NonNull<c_x64emu_t>);
-impl X64Emu{
-    pub fn new( context: &Box64Context) -> Result<Self> {
 
+impl X64Emu{
+    pub fn new(global: &Global) -> Result<Self> {
+        let mut stack_size:usize = 0;
+        {
+            let context = global.require_context()?;
+            //获取栈大小
+            assert!(context.stack_size() != 0);
+            stack_size = context.stack_size();
+        }
+        
     }
-    /// 当前线程的 emu;尚未进入模拟器则 None。绝不触发创建。
+    /// 当前线程的 emu;
     pub fn current() -> Option<Self> {
         //检查当前线程是否已经有一个emu
         if unsafe { c_thread_get_et() }.is_null() {
@@ -163,38 +184,37 @@ impl X64Emu{
         }
         NonNull::new(unsafe { c_thread_get_emu() }).map(Self)
     }
-    //如果当前线程没有emu，则创建一个
-    pub fn ensure_current() -> Result<Self> {
+    /// 如果当前线程没有emu，则创建一个
+    pub fn ensure_current(global: &Global) -> Result<Self> {
         //快速路径：检查emu是否已经存在
         if let Some(emu) = Self::current() {
             return Ok(emu);
         }
         //慢路径：创建emu
-        X64Emu::new()
+        X64Emu::new(global)?;
     }
     pub fn as_ptr(&self) -> *mut c_x64emu_t {
         self.0.as_ptr()
     }
 }
 
-
+pub fn lib_init() -> Result<()> {
+    //初始化
+    GLOBAL.lock()?.init()?;
+    //创建当前线程的emu
+    X64Emu::ensure_current()?;
+    Ok()
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn box64_lib_init() -> i32 {
-    let mut guard = match GLOBAL.lock() {
-        Ok(guard) => guard,
+    match lib_init(){
+        Ok(_) => 0,
         Err(e) => {
-            log!("Failed to lock GLOBAL: {}", e);
-            return -1;
-        }
-    };
-
-    match Global::init(&mut guard) {
-        Ok(()) => 0,
-        Err(err) => {
-            //设置错误
-            guard.err.set_err(&err.to_string());
-            log!("Failed to initialize box64: {:?}", err);
+            log!("lib_init failed: {}", e);
+            if let Ok(mut g) = GLOBAL.lock() {
+                g.err.set_err(&e.to_string());
+            }
             -1
         }
     }
@@ -202,21 +222,22 @@ pub unsafe extern "C" fn box64_lib_init() -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn box64_is_ready() -> i32 {
-    match GLOBAL.lock() {
-        Ok(guard) => i32::from(guard.lib.is_some()),
+    match GLOBAL.lock(){
+        Ok(g) => i32::from(g.is_ready()),
         Err(_) => 0,
     }
 }
 
 #[unsafe(no_mangle)]
+//question: 需要保证ensure_emu与C完全一致吗？(后者假设外部持锁)
+//question: 需要改动rust的锁为重入锁吗？
 pub unsafe extern "C" fn ensure_emu() -> i32 {
-    match X64Emu::ensure_current() {
+    let mut global = GLOBAL.lock()?;
+    match X64Emu::ensure_current(&global) {
         Ok(_) => 0,
         Err(e) => {
             log!("ensure_emu failed: {}", e);
-            if let Ok(mut g) = GLOBAL.lock() {
-                g.err.set_err(&e.to_string());
-            }
+            global.err.set_err(&e.to_string());
             -1
         }
     }
