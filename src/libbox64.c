@@ -67,23 +67,19 @@ int my_dlclose(x64emu_t* emu, void* handle);
 char* my_dlerror(x64emu_t* emu);
 
 static char g_err[512];
-static pthread_mutex_t g_lock;
-static pthread_once_t g_lock_once = PTHREAD_ONCE_INIT;
 
-static void init_lock(void) {
-  pthread_mutexattr_t a;
-  pthread_mutexattr_init(&a);
-  pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
-  pthread_mutex_init(&g_lock, &a);
-  pthread_mutexattr_destroy(&a);
-}
+/* The single recursive lock instance lives in the Rust facade (GLOBAL.ctx,
+ * a PtMutex). Both sides go through pt_mutex (rust/src/pt_mutex/): the C
+ * wrappers below take the pthread handle from box64_ctx_mutex(), Rust locks
+ * the same PtMutex directly. box64_ctx_mutex() hands the handle out only
+ * after the per-instance lazy init (double-checked, attr-based recursive
+ * init in C) — no glibc _NP initializer involved. */
+int pt_mutex_lock(pthread_mutex_t* m);   /* pt_mutex/pt_mutex.h */
+int pt_mutex_unlock(pthread_mutex_t* m);
+pthread_mutex_t* box64_ctx_mutex(void);  /* rust/src/lib.rs */
 
-static void lock(void) {
-  pthread_once(&g_lock_once, init_lock);
-  pthread_mutex_lock(&g_lock);
-}
-
-static void unlock(void) { pthread_mutex_unlock(&g_lock); }
+static void lock(void) { pt_mutex_lock(box64_ctx_mutex()); }
+static void unlock(void) { pt_mutex_unlock(box64_ctx_mutex()); }
 
 static void set_err(const char* msg) {
   if (!msg) {
@@ -101,154 +97,13 @@ static void prepare_lib_paths(box64context_t* ctx) {
   AddPath("libunwind.so.8", &ctx->box64_emulated_libs, 0);
 }
 
-
-/*
- * One emu per thread, each with its own guest stack.
- *
- * thread_get_emu() would auto-create an emu on a 256 KiB fallback stack, which
- * is too small for guest addons that recurse (tree-sitter, rust futures), so
- * probe with thread_get_et() and build the emu here instead. Callers hold the
- * global lock; the emu itself is thread-local and needs no serialization.
- */
-static int ensure_emu(void) {
-  x64emu_t* emu;
-  uintptr_t stack;
-  size_t stacksz;
-  int own_stack;
-
-  //没有初始化context
-  if (my_context == NULL) return -1;
-  //已经初始化过,直接返回
-  if (thread_get_et()!= NULL) return 0;
-
-  assert(my_context->stacksz!=0);
-  stacksz=my_context->stacksz;
-
-    void* p = InternalMmap(NULL, stacksz, PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0);
-    if (p == MAP_FAILED) {
-      set_err("guest stack mmap failed");
-      return -1;
-    }
-    setProtection_stack((uintptr_t)p, stacksz, PROT_READ | PROT_WRITE);
-    stack = (uintptr_t)p;
-    own_stack = 1;
-
-
-  emu = NewX64Emu(my_context,
-                  my_context->ep ? my_context->ep : my_context->exit_bridge,
-                  stack, stacksz, own_stack);
-  if (!emu) {
-    set_err("NewX64Emu failed");
-    return -1;
-  }
-  SetupX64Emu(emu, NULL);
-  refreshTLSData(emu);
-  thread_set_emu(emu);
-  return 0;
-}
-
-BOX64_API int box64_ensure_emu(void) {
-  lock();
-  int rc = ensure_emu();
-  unlock();
-  return rc;
-}
-
-// BOX64_API int box64_lib_init(void) {
-//   lock();
-//   if (g_ready) {
-//     unlock();
-//     return 0;
-//   }
-//   g_err[0] = 0;
-//   ftrace = stderr;
-//   box64_pagesize = (size_t)sysconf(_SC_PAGESIZE);
-//   if (!box64_pagesize) box64_pagesize = 4096;
-
-//   LoadEnvVariables();
-//   InitializeEnvFiles();
-//   if (!getenv("BOX64_NOBANNER")) setenv("BOX64_NOBANNER", "1", 0);
-
-//   InitializeSystemInfo();
-// #ifdef DYNAREC
-//   if (!DetectHostCpuFeatures()) SET_BOX64ENV(dynarec, 0);
-// #endif
-
-//   /*
-//    * Deliberately NOT calling init_signal_helper().
-//    *
-//    * It installs box64's SIGSEGV/SIGBUS/SIGILL/SIGABRT handlers with
-//    * sigaction(sig, &action, NULL) — the old handler is discarded, not chained.
-//    * Inside Electron that would destroy V8's own SIGSEGV handling (write
-//    * barriers, WASM traps), so the host keeps its handlers and box64 installs
-//    * none.
-//    *
-//    * Safe today because dynarec's write protection is a no-op for these guests:
-//    * protectDB() clears PROT_WRITE on pages holding translated code, but guest
-//    * .text is already r-x (no addon ships an RWE segment), so no fault can be
-//    * raised that box64 would have to service. Measured across a full merkle
-//    * index: zero mappings went from writable to read-only.
-//    *
-//    * It stops being safe for a guest with an RWE segment, one that mprotects its
-//    * own code writable at run time, or one that genuinely self-modifies. The fix
-//    * then is either CRC-based block validation (PROT_NEVERCLEAN / always_test,
-//    * no signals involved) or an embedded signal helper that saves the host
-//    * handlers and forwards anything box64 does not recognise.
-//    */
-
-//   my_context = NewBox64Context(1);
-//   if (!my_context) {
-//     set_err("NewBox64Context failed");
-//     unlock();
-//     return -1;
-//   }
-
-//   /*
-//    * NewBox64Context sets box64lib = dlopen(NULL), which is the host Node/Electron
-//    * executable when we are embedded in a .node addon. GOM my_* symbols live in
-//    * the addon DSO — rebind box64lib to the module that contains box64_lib_init.
-//    */
-//   {
-//     Dl_info dli;
-//     if (dladdr((void*)&box64_lib_init, &dli) && dli.dli_fname) {
-//       void* self = dlopen(dli.dli_fname, RTLD_NOW | RTLD_GLOBAL);
-//       if (self) my_context->box64lib = self;
-//     }
-//   }
-
-//   prepare_lib_paths(my_context);
-  
-//   my_context->box64path = box_realpath("/proc/self/exe", NULL);
-//   if (!my_context->box64path) my_context->box64path = box_strdup("libbox64");
-//   my_context->argv[0] = box_strdup("libbox64");
-//   my_context->fullpath = box_strdup(my_context->argv[0]);
-//   my_context->envc = 0;
-//   my_context->envv = (char**)box_calloc(1, sizeof(char*));
-//   my_context->ep = my_context->exit_bridge;
-
-//   loadProtectionFromMap();
-
-//   if (CalcStackSize(my_context)) {
-//     set_err("stack alloc failed");
-//     FreeBox64Context(&my_context);
-//     unlock();
-//     return -1;
-//   }
-
-//   if (ensure_emu() != 0) {
-//     FreeBox64Context(&my_context);
-//     unlock();
-//     return -1;
-//   }
-
-//   setupTraceInit();
-//   setupTrace();
-
-//   g_ready = 1;
-//   unlock();
-//   return 0;
-// }
+/* ensure_emu, box64_lib_init and box64_is_ready live in the Rust facade
+ * (rust/src/lib.rs); lib_init creates the context and the first emu,
+ * ensure_emu guarantees a full-size stack per thread (thread_get_emu's
+ * 256 KiB fallback is too small for recursive guests). The lock contract
+ * is unchanged: entry points hold it across the call; wrapped callbacks
+ * may call box64_ensure_emu unlocked — the recursive lock takes care of
+ * both. */
 
 BOX64_API void box64_lib_fini(void) {
   lock();
@@ -274,7 +129,7 @@ BOX64_API void* box64_dlopen(const char* path, int flags) {
     return NULL;
   }
   lock();
-  if (ensure_emu() != 0) {
+  if (box64_ensure_emu() != 0) {
     unlock();
     return NULL;
   }
@@ -304,7 +159,7 @@ BOX64_API void* box64_dlsym(void* handle, const char* name) {
     return NULL;
   }
   lock();
-  if (ensure_emu() != 0) {
+  if (box64_ensure_emu() != 0) {
     unlock();
     return NULL;
   }
@@ -326,7 +181,7 @@ BOX64_API int box64_dlclose(void* handle) {
   uintptr_t lo = 0, hi = 0;
   if (!box64_is_ready()) return -1;
   lock();
-  if (ensure_emu() != 0) {
+  if (box64_ensure_emu() != 0) {
     unlock();
     return -1;
   }
@@ -361,7 +216,7 @@ BOX64_API uint64_t box64_call(void* sym, const char* fmt, ...) {
   uint64_t ret = 0;
   if (!box64_is_ready() || !sym) return 0;
   lock();
-  if (ensure_emu() != 0) {
+  if (box64_ensure_emu() != 0) {
     unlock();
     return 0;
   }
@@ -410,7 +265,7 @@ BOX64_API uint64_t box64_call_regs(void* sym, uint64_t* gregs, uint64_t* fregs) 
   uint64_t ret;
   if (!box64_is_ready() || !sym || !gregs || !fregs) return 0;
   lock();
-  if (ensure_emu() != 0) {
+  if (box64_ensure_emu() != 0) {
     unlock();
     return 0;
   }
@@ -442,7 +297,7 @@ BOX64_API uint64_t box64_call_marshaled(void* sym, uint64_t* gregs,
   size_t al;
   if (!box64_is_ready() || !sym || !gregs || !fregs) return 0;
   lock();
-  if (ensure_emu() != 0) {
+  if (box64_ensure_emu() != 0) {
     unlock();
     return 0;
   }

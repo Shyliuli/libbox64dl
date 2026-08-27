@@ -1,5 +1,7 @@
+use anyhow::Context;
 use libc::FILE;
 use std::ffi::c_void;
+use std::ptr::NonNull;
 
 /// 对应 C 的 box64context_t
 #[repr(C)]
@@ -48,10 +50,10 @@ unsafe extern "C" {
     pub unsafe fn c_CalcStackSize(context: *mut c_box64_ctx) -> i32;
 
     // threads.c — thread_get_et 只探测当前线程是否已有 et,绝不创建。
-    // 不要拿 thread_get_emu 当探测用:无 et 时它会自动创建 256KiB 栈的
-    // fallback emu 装进 TLS,之后大栈 emu 就再也装不进去了。
     #[link_name = "thread_get_et"]
     pub unsafe fn c_thread_get_et() -> *mut c_void; // emuthread_t*,仅用于判空
+
+    // thread_get_emu 返回当前线程的emu,如果当前线程没有emu,则生成一个256k栈的emu
     #[link_name = "thread_get_emu"]
     pub unsafe fn c_thread_get_emu() -> *mut c_x64emu_t;
 
@@ -60,8 +62,21 @@ unsafe extern "C" {
 
     //box64全局页大小
     pub static mut box64_pagesize: usize;
+    
+    #[link_name = "new_x64emu"]
+    pub unsafe fn c_new_x64emu(context: *mut c_box64_ctx) -> *mut c_x64emu_t;
 }
 
 pub fn init_box64_trace() {
     unsafe { c_init_box64_trace() };
+}
+
+pub fn new_x64emu(context: *mut c_box64_ctx) -> anyhow::Result<NonNull<c_x64emu_t>> {
+    let emu = unsafe { c_new_x64emu(context) };
+    //报错来自C函数；为空时（C 侧没来得及记录）退回通用消息
+    NonNull::new(emu)
+        .with_context(|| {
+            let reason = crate::GLOBAL.err.lock().unwrap_or_else(|p| p.into_inner()).get_err().to_string();
+            if reason.is_empty() { "new_x64emu failed".to_string() } else { reason }
+        })
 }

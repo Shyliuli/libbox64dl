@@ -37,6 +37,8 @@ fn main() {
     // (src is required for dynarec/native_lock.h pulled by box64context.h).
     let mut cc = cc::Build::new();
     cc.file("shim.c")
+        .file("src/pt_mutex/pt_mutex.c")
+        .include("src/pt_mutex")
         .include(box64.join("src/include"))
         .include(box64.join("src"))
         .define("LA64", None);
@@ -67,4 +69,14 @@ fn main() {
     if dynarec.is_file() {
         println!("cargo:rerun-if-changed={}", dynarec.display());
     }
+
+    // cargo test 链接整个 crate（经 shim 引出 box64 符号），box64.a 与
+    // libdynarec.a 相互引用，单向归档顺序解析不了，需要 --start-group。
+    // staticlib 不经过链接器，生产构建不受影响。
+    println!("cargo:rustc-link-arg=-Wl,--start-group");
+    println!("cargo:rustc-link-arg={}", build_dir.join("libbox64.a").display());
+    if dynarec.is_file() {
+        println!("cargo:rustc-link-arg={}", dynarec.display());
+    }
+    println!("cargo:rustc-link-arg=-Wl,--end-group");
 }
