@@ -1,0 +1,64 @@
+# libbox64dl patch 0003: route host-context faults away from guest-handler
+# emulation (see src/signal_route.c). Embedded-mode fix; standalone box64
+# never has foreign threads, hence never triggered there.
+
+--- a/src/libtools/threads.c
++++ b/src/libtools/threads.c
+@@ -225,6 +225,15 @@
+ {
+ 	pthread_setspecific(thread_key, NULL);
+ }
++/* libbox64dl patch 0003: the faulting thread's own emu, or NULL when it has
++ * none — unlike thread_get_emu(), never fabricates one (a signal handler on
++ * a foreign host thread must not conjure a guest context out of nowhere). */
++x64emu_t* thread_peek_emu(void)
++{
++	emuthread_t *et = (emuthread_t*)pthread_getspecific(thread_key);
++	return et ? et->emu : NULL;
++}
++
+ void thread_set_emu(x64emu_t* emu)
+ {
+ 	emuthread_t *et = (emuthread_t*)pthread_getspecific(thread_key);
+--- a/src/libtools/signals.c
++++ b/src/libtools/signals.c
+@@ -695,8 +695,18 @@
+ extern int box64_quit;
+ extern int box64_exit_code;
+ 
++/* libbox64dl patch 0003: host-context fault routing for embedded mode.
++ * box64dl_signal_route (src/signal_route.c, grafted into this build) returns
++ * 1 when the fault belongs to a host thread — no guest TEB — and has been
++ * handed to the pre-box64 host action (saved in init_signal_helper below);
++ * box64 must then not emulate the guest's handler on a contextless emu. */
++extern x64emu_t* thread_peek_emu(void);
++extern int box64dl_signal_route(x64emu_t* emu, int sig, siginfo_t* info, void* ucntx);
++struct sigaction box64dl_pre_segv, box64dl_pre_bus, box64dl_pre_ill, box64dl_pre_abrt;
++
+ void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
+ {
++    if (box64dl_signal_route(thread_peek_emu(), sig, info, ucntx)) return;
+     sig = signal_to_x64(sig);
+     // sig==X64_SIGSEGV || sig==X64_SIGBUS || sig==X64_SIGILL || sig==X64_SIGABRT here!
+     int log_minimum = (BOX64ENV(showsegv))?LOG_NONE:((((sig==X64_SIGSEGV) || (sig==X64_SIGILL)) && my_context->is_sigaction[sig])?LOG_DEBUG:LOG_INFO);
+@@ -1693,16 +1703,16 @@
+     struct sigaction action = {0};
+     action.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
+     action.sa_sigaction = my_box64signalhandler;
+-    sigaction(SIGSEGV, &action, NULL);
++    sigaction(SIGSEGV, &action, &box64dl_pre_segv);
+     action.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
+     action.sa_sigaction = my_box64signalhandler;
+-    sigaction(SIGBUS, &action, NULL);
++    sigaction(SIGBUS, &action, &box64dl_pre_bus);
+     action.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
+     action.sa_sigaction = my_box64signalhandler;
+-    sigaction(SIGILL, &action, NULL);
++    sigaction(SIGILL, &action, &box64dl_pre_ill);
+     action.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
+     action.sa_sigaction = my_box64signalhandler;
+-    sigaction(SIGABRT, &action, NULL);
++    sigaction(SIGABRT, &action, &box64dl_pre_abrt);
+ 
+     pthread_once(&sigstack_key_once, sigstack_key_alloc);
+ #ifdef USE_SIGNAL_MUTEX
