@@ -10,6 +10,7 @@ third_party/box64/src/libbox64.c
 third_party/box64/src/thunk.c
 third_party/box64/src/thunk_la64.S
 third_party/box64/src/include/libbox64.h
+third_party/box64/src/include/libbox64_ext.h
 third_party/box64/src/include/box64dl_thunk.h
 third_party/box64/src/wrapped/wrappedlibgccs.c
 third_party/box64/src/wrapped/wrappedlibgccs_private.h
