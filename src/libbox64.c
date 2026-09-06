@@ -66,7 +66,10 @@ void* my_dlsym(x64emu_t* emu, void* handle, void* symbol);
 int my_dlclose(x64emu_t* emu, void* handle);
 char* my_dlerror(x64emu_t* emu);
 
-static char g_err[512];
+/* Rust facade (rust/src/lib.rs)：线程局部错误槽，读到即消费。
+ * box64_set_err(NULL) 清空；box64_get_error 的指针合法到本线程下一次错误操作。 */
+extern void box64_set_err(const char* msg);
+extern const char* box64_get_error(void);
 
 /* The single recursive lock instance lives in the Rust facade (GLOBAL.ctx,
  * a PtMutex). Both sides go through pt_mutex (rust/src/pt_mutex/): the C
@@ -81,13 +84,7 @@ pthread_mutex_t* box64_ctx_mutex(void);  /* rust/src/lib.rs */
 static void lock(void) { pt_mutex_lock(box64_ctx_mutex()); }
 static void unlock(void) { pt_mutex_unlock(box64_ctx_mutex()); }
 
-static void set_err(const char* msg) {
-  if (!msg) {
-    g_err[0] = 0;
-    return;
-  }
-  snprintf(g_err, sizeof(g_err), "%s", msg);
-}
+static void set_err(const char* msg) { box64_set_err(msg); }
 
 static void prepare_lib_paths(box64context_t* ctx) {
   LoadLDPath(ctx);
@@ -121,8 +118,6 @@ BOX64_API int box64_lib_ready(void) { return box64_is_ready(); }
 BOX64_API void* box64_dlopen(const char* path, int flags) {
   x64emu_t* emu;
   void* handle;
-  char buf[4096];
-  const char* abs = path;
   if (!box64_is_ready() && box64_lib_init() != 0) return NULL;
   if (!path) {
     set_err("box64_dlopen: NULL path");
@@ -134,9 +129,9 @@ BOX64_API void* box64_dlopen(const char* path, int flags) {
     return NULL;
   }
   emu = thread_get_emu();
-  if (path[0] != '/' && realpath(path, buf)) abs = buf;
   if (flags == 0) flags = RTLD_NOW;
-  handle = my_dlopen(emu, (void*)abs, flags);
+  /*core:dlopen的实际执行者*/
+  handle = my_dlopen(emu, (void*)path, flags);
   if (!handle) {
     char* e = my_dlerror(emu);
     set_err(e ? e : "box64_dlopen failed");
@@ -209,55 +204,7 @@ BOX64_API int box64_dlclose(void* handle) {
   return rc;
 }
 
-BOX64_API const char* box64_dlerror(void) { return g_err[0] ? g_err : NULL; }
-
-BOX64_API uint64_t box64_call(void* sym, const char* fmt, ...) {
-  va_list ap;
-  uint64_t ret = 0;
-  if (!box64_is_ready() || !sym) return 0;
-  lock();
-  if (box64_ensure_emu() != 0) {
-    unlock();
-    return 0;
-  }
-  unlock();
-  va_start(ap, fmt);
-  if (!fmt || !fmt[0]) {
-    ret = RunFunctionFmt((uintptr_t)sym, "");
-  } else if (strcmp(fmt, "i") == 0) {
-    int a0 = va_arg(ap, int);
-    ret = RunFunctionFmt((uintptr_t)sym, "i", a0);
-  } else if (strcmp(fmt, "ii") == 0) {
-    int a0 = va_arg(ap, int), a1 = va_arg(ap, int);
-    ret = RunFunctionFmt((uintptr_t)sym, "ii", a0, a1);
-  } else if (strcmp(fmt, "iii") == 0) {
-    int a0 = va_arg(ap, int), a1 = va_arg(ap, int), a2 = va_arg(ap, int);
-    ret = RunFunctionFmt((uintptr_t)sym, "iii", a0, a1, a2);
-  } else if (strcmp(fmt, "p") == 0) {
-    void* a0 = va_arg(ap, void*);
-    ret = RunFunctionFmt((uintptr_t)sym, "p", a0);
-  } else if (strcmp(fmt, "ip") == 0) {
-    int a0 = va_arg(ap, int);
-    void* a1 = va_arg(ap, void*);
-    ret = RunFunctionFmt((uintptr_t)sym, "ip", a0, a1);
-  } else if (strcmp(fmt, "pp") == 0) {
-    void* a0 = va_arg(ap, void*);
-    void* a1 = va_arg(ap, void*);
-    ret = RunFunctionFmt((uintptr_t)sym, "pp", a0, a1);
-  } else if (strcmp(fmt, "dd") == 0) {
-    double a0 = va_arg(ap, double), a1 = va_arg(ap, double);
-    ret = RunFunctionFmt((uintptr_t)sym, "dd", a0, a1);
-  } else if (strcmp(fmt, "ff") == 0) {
-    double a0 = va_arg(ap, double), a1 = va_arg(ap, double);
-    ret = RunFunctionFmt((uintptr_t)sym, "ff", (float)a0, (float)a1);
-  } else {
-    set_err("box64_call: unsupported fmt (use box64_call_regs)");
-    ret = 0;
-  }
-  va_end(ap);
-  return ret;
-}
-
+BOX64_API const char* box64_dlerror(void) { return box64_get_error(); }
 BOX64_API uint64_t box64_call_regs(void* sym, uint64_t* gregs, uint64_t* fregs) {
   x64emu_t* emu;
   int nn[] = {_DI, _SI, _DX, _CX, _R8, _R9};

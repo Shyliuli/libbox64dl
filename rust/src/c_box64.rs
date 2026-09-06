@@ -76,7 +76,9 @@ pub fn new_x64emu(context: *mut c_box64_ctx) -> anyhow::Result<NonNull<c_x64emu_
     //报错来自C函数；为空时（C 侧没来得及记录）退回通用消息
     NonNull::new(emu)
         .with_context(|| {
-            let reason = crate::GLOBAL.err.lock().unwrap_or_else(|p| p.into_inner()).get_err().to_string();
-            if reason.is_empty() { "new_x64emu failed".to_string() } else { reason }
+            match crate::Global::get_err() {
+                Some(reason) => reason.to_string(),
+                None => "new_x64emu failed".to_string(),
+            }
         })
 }

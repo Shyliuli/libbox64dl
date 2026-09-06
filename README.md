@@ -15,7 +15,6 @@ box64 作为程序启动、建立 `my_context` 和线程 emu 之后才可达。l
 box64_lib_init();                                  /* 起运行时 */
 void* h = box64_dlopen("guest.so", RTLD_NOW);      /* 加载 x86_64 .so */
 void* f = box64_dlsym(h, "func");                  /* 取 guest 函数 */
-box64_call(f, "pp", a, b);                         /* 简单签名调用 */
 box64_call_regs(f, gregs, fregs);                  /* 寄存器直通 */
 box64_call_marshaled(f, gregs, fregs, stk, len);   /* 带栈参数 */
 void* cb = box64_callback(host_fn);                /* 宿主函数 → guest 可调地址 */

@@ -225,6 +225,15 @@ void thread_forget_emu()
 {
 	pthread_setspecific(thread_key, NULL);
 }
+/* libbox64dl patch 0003: the faulting thread's own emu, or NULL when it has
+ * none — unlike thread_get_emu(), never fabricates one (a signal handler on
+ * a foreign host thread must not conjure a guest context out of nowhere). */
+x64emu_t* thread_peek_emu(void)
+{
+	emuthread_t *et = (emuthread_t*)pthread_getspecific(thread_key);
+	return et ? et->emu : NULL;
+}
+
 void thread_set_emu(x64emu_t* emu)
 {
 	emuthread_t *et = (emuthread_t*)pthread_getspecific(thread_key);

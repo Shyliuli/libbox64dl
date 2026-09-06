@@ -1,38 +1,59 @@
 //如果想要阅读这份源代码，建议到最后看对C暴露的接口部分回溯。
 mod c_box64;
+mod cstring;
 mod env;
 mod log;
 mod page_size;
 mod pt_mutex;
 use pt_mutex::PtMutex;
+use std::cell::RefCell;
 use std::ffi::{c_void, CStr};
 use std::ptr::NonNull;
-use std::sync::Mutex;
 use anyhow::{bail, Result};
 use c_box64::*;
+use cstring::CString;
 use log::init_log;
 use page_size::init_pagesize;
 
 struct GlobalError {
-    err: String,
+    err: CString,
+    //标记Error是否被读过
+    fresh: bool,
 }
 
 impl GlobalError {
-    pub const fn new() -> Self {
-        Self { err: String::new() }
+    pub fn new() -> Self {
+        Self { err: CString::new(), fresh: false }
     }
     pub fn set_err(&mut self, msg: &str) {
         //我们在set_err时，认为前面的错误已经失效了，所以直接清空
-        //与C不同
-        self.clear_err();
-        self.err.push_str(msg);
+        self.err.clear();
+        //消息含 NUL 时在第一个 NUL 处截断，不视为失败
+        let _ = self.err.push_str(msg);
+        self.fresh = true;
     }
-    pub fn get_err(&self) -> &str {
-        &self.err
+    /// 读即消费：连续第二次调用返回 None（对齐 POSIX dlerror 语义）
+    pub fn get_err(&mut self) -> Option<CString> {
+        if !self.fresh {
+            return None;
+        }
+        self.fresh = false;
+        Some(self.err.clone())
     }
     pub fn clear_err(&mut self) {
+        self.fresh = false;
         self.err.clear();
     }
+    /// 供 FFI 出口：直接给线程局部槽位的指针，避免克隆后悬空
+    pub fn as_ptr(&self) -> *const libc::c_char {
+        self.err.as_ptr()
+    }
+}
+
+thread_local! {
+    //每线程一个错误槽（glibc 同款语义）：谁调用的错谁读得到，无锁无竞争，
+    //也不存在与 ctx 锁的锁序问题
+    static ERR: RefCell<GlobalError> = RefCell::new(GlobalError::new());
 }
 
 struct Box64Context {
@@ -88,26 +109,24 @@ impl Drop for Box64Context {
         }
     }
 }
-//持err锁期间不得再取任何锁（包括 ctx），否则会与"持 ctx 记错误"的正常路径构成 ABBA 死锁
 struct Global {
-    err: Mutex<GlobalError>,
     //重入锁：C 共享这把锁
     ctx: PtMutex<Option<Box64Context>>,
 }
 
 static GLOBAL: Global = Global {
-    err: Mutex::new(GlobalError::new()),
     ctx: PtMutex::new(None),
 };
 
 impl Global {
     fn set_err(msg: &str) {
-        let mut err = GLOBAL.err.lock().unwrap_or_else(|p| p.into_inner());
-        err.set_err(msg);
+        ERR.with_borrow_mut(|e| e.set_err(msg));
     }
     fn clear_err() {
-        let mut err = GLOBAL.err.lock().unwrap_or_else(|p| p.into_inner());
-        err.clear_err();
+        ERR.with_borrow_mut(|e| e.clear_err());
+    }
+    pub(crate) fn get_err() -> Option<CString> {
+        ERR.with_borrow_mut(|e| e.get_err())
     }
     /// 惰性初始化 context。调用者必须已持有 ctx 锁（参数借自 guard）。
     fn init(ctx: &mut Option<Box64Context>) -> Result<()> {
@@ -253,4 +272,15 @@ pub unsafe extern "C" fn box64_ensure_emu() -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn box64_ctx_mutex() -> *mut libc::pthread_mutex_t {
     GLOBAL.ctx.raw()
+}
+
+/// 线程局部错误槽出口，供 C 的 box64_dlerror：读到即消费；
+/// 无错或已被消费返回 NULL。指针指向槽位本体，合法到本线程下一次错误操作
+/// （set/clear 可能触发扩容搬移），即 glibc 式"活到下一次调用"契约。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn box64_get_error() -> *const libc::c_char {
+    ERR.with_borrow_mut(|e| match e.get_err() {
+        Some(_) => e.as_ptr(),
+        None => std::ptr::null(),
+    })
 }

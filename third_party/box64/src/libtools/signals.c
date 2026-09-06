@@ -695,8 +695,18 @@ static pthread_mutex_t mutex_dynarec_prot = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER
 extern int box64_quit;
 extern int box64_exit_code;
 
+/* libbox64dl patch 0003: host-context fault routing for embedded mode.
+ * box64dl_signal_route (src/signal_route.c, grafted into this build) returns
+ * 1 when the fault belongs to a host thread — no guest TEB — and has been
+ * handed to the pre-box64 host action (saved in init_signal_helper below);
+ * box64 must then not emulate the guest's handler on a contextless emu. */
+extern x64emu_t* thread_peek_emu(void);
+extern int box64dl_signal_route(x64emu_t* emu, int sig, siginfo_t* info, void* ucntx);
+struct sigaction box64dl_pre_segv, box64dl_pre_bus, box64dl_pre_ill, box64dl_pre_abrt;
+
 void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
 {
+    if (box64dl_signal_route(thread_peek_emu(), sig, info, ucntx)) return;
     sig = signal_to_x64(sig);
     // sig==X64_SIGSEGV || sig==X64_SIGBUS || sig==X64_SIGILL || sig==X64_SIGABRT here!
     int log_minimum = (BOX64ENV(showsegv))?LOG_NONE:((((sig==X64_SIGSEGV) || (sig==X64_SIGILL)) && my_context->is_sigaction[sig])?LOG_DEBUG:LOG_INFO);
@@ -1693,16 +1703,16 @@ void init_signal_helper(box64context_t* context)
     struct sigaction action = {0};
     action.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
     action.sa_sigaction = my_box64signalhandler;
-    sigaction(SIGSEGV, &action, NULL);
+    sigaction(SIGSEGV, &action, &box64dl_pre_segv);
     action.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
     action.sa_sigaction = my_box64signalhandler;
-    sigaction(SIGBUS, &action, NULL);
+    sigaction(SIGBUS, &action, &box64dl_pre_bus);
     action.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
     action.sa_sigaction = my_box64signalhandler;
-    sigaction(SIGILL, &action, NULL);
+    sigaction(SIGILL, &action, &box64dl_pre_ill);
     action.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
     action.sa_sigaction = my_box64signalhandler;
-    sigaction(SIGABRT, &action, NULL);
+    sigaction(SIGABRT, &action, &box64dl_pre_abrt);
 
     pthread_once(&sigstack_key_once, sigstack_key_alloc);
 #ifdef USE_SIGNAL_MUTEX
