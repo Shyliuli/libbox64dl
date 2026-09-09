@@ -38,7 +38,8 @@ CMAKE_PIC := $(CMAKE_COMMON) -DLARCH64_DYNAREC=$(PIC_DYNAREC) \
 	-DCMAKE_C_FLAGS="-fPIC -ftls-model=global-dynamic" \
 	-DCMAKE_ASM_FLAGS="-fPIC"
 
-.PHONY: all static pic patch unpatch graft plugins test clean distclean rust rust-static rust-pic
+.PHONY: all static pic patch unpatch graft plugins test clean distclean rust rust-static \
+	rust-pic cli
 
 all: static pic
 
@@ -54,6 +55,43 @@ rust-static: $(BUILD_STATIC)/libbox64.a
 	cd rust && CARGO_TARGET_DIR=target/static cargo build
 rust-pic: $(BUILD_PIC)/libbox64.a
 	cd rust && CARGO_TARGET_DIR=target/pic LIBBOX64_FLAVOR=pic cargo build
+
+# ---- packaged box64 CLI: the runtime/bin/box64 an app tree ships ----
+# Thin main (cli/box64_main.c) over the static engine, linked with the same
+# shape embedders use: whole-archive the engine + dynarec, then the Rust
+# facade that resolves the facade symbols libbox64.c references. Wine's
+# companion children (wineserver/wineboot) re-exec through this binary
+# exactly like through a system box64.
+CLI := $(ROOT)/build/bin/box64
+RUST_STATIC := $(ROOT)/rust/target/static/debug/liblibbox64.a
+
+SHARED := $(ROOT)/build/lib/libbox64dl.so
+RUST_PIC := $(ROOT)/rust/target/pic/debug/liblibbox64.a
+
+cli: $(CLI)
+
+shared: $(SHARED)
+
+$(RUST_PIC): FORCE
+	$(MAKE) rust-pic
+
+$(SHARED): cli/entry.c $(BUILD_PIC)/libbox64.a $(RUST_PIC)
+	@mkdir -p $(dir $@)
+	$(CC) -fPIC -Iinclude -I$(BOX64)/src/include -shared -Wl,-soname,libbox64dl.so -Wl,-z,defs -o $@ cli/entry.c \
+		-Wl,--whole-archive $(BUILD_PIC)/libbox64.a \
+		$(BUILD_PIC)/libdynarec.a -Wl,--no-whole-archive \
+		$(RUST_PIC) -lpthread -lm -ldl -lrt -lresolv -lutil
+
+$(RUST_STATIC): FORCE
+	$(MAKE) rust-static
+
+FORCE:
+
+$(CLI): cli/box64_main.c $(SHARED)
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -std=c11 -D_GNU_SOURCE -I$(BOX64)/src/include -o $@ \
+		cli/box64_main.c \
+		-L$(dir $(SHARED)) -lbox64dl -Wl,-rpath,'$$ORIGIN/../lib'
 
 build/test_thunk: tests/test_thunk.c tests/test_thunk_shim.S src/thunk.c src/thunk_la64.S
 	@mkdir -p build

@@ -77,8 +77,26 @@ BOX64_DYNAREC=0 ./your-app # 运行期回退，无需重新构建
 make          # 两份都构建
 make pic      # 只构建 PIC（uninode 需要）
 make static   # 只构建静态（unilib 测试需要）
+make cli      # 打包版 box64 CLI（build/bin/box64）
 make plugins  # 列出已注册插件
 ```
+
+## 打包版 box64 CLI
+
+`make cli` 产出 `build/bin/box64`：一个 LoongArch 可执行文件，`cli/box64_main.c`
+就是上游 `main.c` 那两句 `initialize()` + `emulate()`，链接到本项目的静态引擎
+（whole-archive `libbox64.a` + `libdynarec.a` + Rust facade，与 unilib 测试相同的
+链接形状）。它是应用打包布局里的 `runtime/bin/box64`：
+
+- winedl 用它当 `system_box64`：prefix 引导的 wineboot 子进程、以及嵌入式引擎
+  的 `box64path`（wineserver / CreateProcess 子进程 re-exec 的落点）都指向它；
+- 行为与系统 box64 完全一致（嵌入用的三张补丁对独立运行路径都是 no-op：
+  0003 的 host-fault 路由在没有外来宿主线程时永不触发，0002 只改默认日志级别）。
+
+wine 的 x86_64-unix `ntdll.so` 需要 libgcc 的 `_Unwind_Find_FDE`（它的
+DWARF↔SEH 桥）；系统 box64 走模拟版 `/usr/lib/box64-x86_64-linux-gnu/libgcc_s.so.1`
+拿到它，而 libgccs 插件选择 wrap 宿主 libgcc，因此符号表里必须带上——补上之前
+wine 在这个引擎下起不来。
 
 ## wrapped library 插件
 

@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 BOX64_API int box64_lib_init(void);
+BOX64_API int box64_main(int argc, const char** argv, char** env);
 BOX64_API void box64_lib_fini(void);
 BOX64_API int box64_lib_ready(void);
 /* Rust facade owns the ready state: returns whether its BOX64_LIB Option is

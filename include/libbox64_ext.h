@@ -43,6 +43,7 @@ extern "C" {
  * given NULL / out of memory.
  */
 BOX64_API int box64_set_box64path(const char* path);
+BOX64_API void box64_set_wine_mode(void);
 
 /*
  * Guest RSP as a bridge callback was entered — the stack sibling of

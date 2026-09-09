@@ -21,5 +21,9 @@ third_party/box64/box64dl_core.cmake
 third_party/box64/box64dl_plugins.cmake
 third_party/box64/.libbox64dl_patches_stamp
 
+# Local state: build stamp and the clangd index cache
+BUILD_OK
+third_party/box64/.cache/
+
 # Downstream projects register plugins by symlinking their directory in
 plugins/libnode

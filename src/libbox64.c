@@ -115,6 +115,11 @@ BOX64_API void box64_lib_fini(void) {
 
 BOX64_API int box64_lib_ready(void) { return box64_is_ready(); }
 
+BOX64_API void box64_set_wine_mode(void) {
+  extern int box64_wine;
+  box64_wine = 1;
+}
+
 BOX64_API void* box64_dlopen(const char* path, int flags) {
   x64emu_t* emu;
   void* handle;
