@@ -205,6 +205,18 @@ BOX64_API int box64_set_box64path(const char* path) {
   return 0;
 }
 
+/// 宿主可执行文件所在目录（符号链接已解析）；失败返回 -1。
+static int exe_dir(char* out, size_t out_len) {
+  ssize_t n = readlink("/proc/self/exe", out, out_len - 1);
+  char* slash;
+  if (n <= 0) return -1;
+  out[n] = 0;
+  slash = strrchr(out, '/');
+  if (!slash || slash == out) return -1;
+  *slash = 0;
+  return 0;
+}
+
 void init_guest(box64context_t *my_context) {
   //基本是占位的，因为libbox64dl是用来跑动态链接库/.node的
   my_context->argv[0] = box_strdup("");
@@ -240,6 +252,25 @@ void init_guest(box64context_t *my_context) {
   // guest DT_NEEDED like libstdc++.so.6 cannot be found (no wrapper → must
   // emulate the x86_64 .so from BOX64_LD_LIBRARY_PATH / box64-x86_64 paths).
   LoadLDPath(my_context);
+  // Payload dirs anchored at the host executable: "." follows the process
+  // cwd, so ./build/app launched from the tree root would search the wrong
+  // directory. Must go AFTER LoadLDPath — its ParseList wipes any entries
+  // already in the collection — and LD_LIBRARY_PATH is re-prepended the
+  // same way LoadLDPath does, so the final order keeps the environment in
+  // charge: LD_LIBRARY_PATH > exe dirs > BOX64_LD_LIBRARY_PATH/defaults.
+  {
+    char dir[PATH_MAX], sub[PATH_MAX];
+    static const char* const rel[] = {"../lib64", "../lib", "lib64", "lib"};
+    size_t i;
+    if (exe_dir(dir, sizeof dir) == 0) {
+      for (i = 0; i < sizeof rel / sizeof *rel; ++i)
+        if (snprintf(sub, sizeof sub, "%s/%s", dir, rel[i]) < (int)sizeof sub)
+          PrependPath(sub, &my_context->box64_ld_lib, 1);
+      PrependPath(dir, &my_context->box64_ld_lib, 1);
+    }
+  }
+  if (getenv("LD_LIBRARY_PATH"))
+    PrependList(&my_context->box64_ld_lib, getenv("LD_LIBRARY_PATH"), 1);
   AddPath(".", &my_context->box64_ld_lib, 1);
 
   // Host libgcc_s is LoongArch; x86_64 libstdc++ needs guest quad-math /

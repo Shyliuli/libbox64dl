@@ -86,14 +86,6 @@ static void unlock(void) { pt_mutex_unlock(box64_ctx_mutex()); }
 
 static void set_err(const char* msg) { box64_set_err(msg); }
 
-static void prepare_lib_paths(box64context_t* ctx) {
-  LoadLDPath(ctx);
-  AddPath(".", &ctx->box64_ld_lib, 1);
-  AddPath("libssl.so.1", &ctx->box64_emulated_libs, 0);
-  AddPath("libcrypto.so.1", &ctx->box64_emulated_libs, 0);
-  AddPath("libunwind.so.8", &ctx->box64_emulated_libs, 0);
-}
-
 /* ensure_emu, box64_lib_init and box64_is_ready live in the Rust facade
  * (rust/src/lib.rs); lib_init creates the context and the first emu,
  * ensure_emu guarantees a full-size stack per thread (thread_get_emu's
