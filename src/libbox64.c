@@ -95,6 +95,7 @@ static void set_err(const char* msg) { box64_set_err(msg); }
  * both. */
 
 BOX64_API void box64_lib_fini(void) {
+  printf("[box64] box64_lib_fini enter.\n");
   lock();
   if (!box64_is_ready()) {
     unlock();
@@ -115,6 +116,7 @@ BOX64_API void box64_set_wine_mode(void) {
 BOX64_API void* box64_dlopen(const char* path, int flags) {
   x64emu_t* emu;
   void* handle;
+  printf("[box64] box64_dlopen path=%s.\n", path ? path : "(null)");
   if (!box64_is_ready() && box64_lib_init() != 0) return NULL;
   if (!path) {
     set_err("box64_dlopen: NULL path");
@@ -142,6 +144,7 @@ BOX64_API void* box64_dlopen(const char* path, int flags) {
 BOX64_API void* box64_dlsym(void* handle, const char* name) {
   x64emu_t* emu;
   void* p;
+  printf("[box64] box64_dlsym name=%s.\n", name ? name : "(null)");
   if (!box64_is_ready()) {
     set_err("not initialized");
     return NULL;
@@ -170,6 +173,7 @@ BOX64_API void* box64_dlsym(void* handle, const char* name) {
 BOX64_API int box64_dlclose(void* handle) {
   x64emu_t* emu;
   int rc;
+  printf("[box64] box64_dlclose handle=%p.\n", handle);
   uintptr_t lo = 0, hi = 0;
   if (!box64_is_ready()) return -1;
   lock();
@@ -207,6 +211,7 @@ BOX64_API uint64_t box64_call_regs(void* sym, uint64_t* gregs, uint64_t* fregs) 
   int nn[] = {_DI, _SI, _DX, _CX, _R8, _R9};
   int i;
   uint64_t ret;
+  printf("[box64] box64_call_regs sym=%p.\n", sym);
   if (!box64_is_ready() || !sym || !gregs || !fregs) return 0;
   lock();
   if (box64_ensure_emu() != 0) {
@@ -238,6 +243,8 @@ BOX64_API uint64_t box64_call_marshaled(void* sym, uint64_t* gregs,
   int i;
   uint64_t ret;
   uintptr_t oldip;
+  printf("[box64] box64_call_marshaled sym=%p stack_len=%zu.\n", sym,
+         stack_len);
   size_t al;
   if (!box64_is_ready() || !sym || !gregs || !fregs) return 0;
   lock();
@@ -293,6 +300,7 @@ static void bridge_host6(x64emu_t* emu, uintptr_t fnc) {
  */
 BOX64_API void box64_bridge_args(void* emuv, uint64_t* gregs, uint64_t* fregs) {
   x64emu_t* emu = (x64emu_t*)emuv;
+  printf("[box64] box64_bridge_args emu=%p.\n", emuv);
   int nn[] = {_DI, _SI, _DX, _CX, _R8, _R9};
   int i;
   if (!emu || !gregs || !fregs) return;
@@ -303,6 +311,8 @@ BOX64_API void box64_bridge_args(void* emuv, uint64_t* gregs, uint64_t* fregs) {
 BOX64_API void box64_bridge_ret(void* emuv, uint64_t rax, uint64_t rdx,
                                 const uint64_t* fregs2) {
   x64emu_t* emu = (x64emu_t*)emuv;
+  printf("[box64] box64_bridge_ret rax=0x%llx.\n",
+         (unsigned long long)rax);
   if (!emu) return;
   R_RAX = rax;
   R_RDX = rdx;
@@ -326,6 +336,7 @@ BOX64_API void* box64_callback(void* host_fn, const char* fmt) {
  */
 BOX64_API void* box64_callback_with(void* host_fn, void* bridge_fn) {
   uintptr_t br;
+  printf("[box64] box64_callback_with host_fn=%p.\n", host_fn);
   if (!box64_is_ready() && box64_lib_init() != 0) return NULL;
   if (!host_fn || !bridge_fn) return NULL;
   lock();
