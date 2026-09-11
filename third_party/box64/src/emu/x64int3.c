@@ -119,6 +119,18 @@ void x64Int3(x64emu_t* emu, uintptr_t* addr)
         return;
     }
     onebridge_t* bridge = (onebridge_t*)(*addr-1);
+    {
+        /* winedl investigation: which address does box64 report when a bridge
+         * int3 traps, and does the record signature check out? */
+        static int dbg = -1;
+        if (dbg < 0) dbg = getenv( "BOX64_BRIDGE_DEBUG" ) != NULL;
+        if (dbg)
+            fprintf( stderr,
+                     "[bridge] x64Int3 *addr=%p R_RIP=%p prev=%02x sig=%02x%02x ok=%d\n",
+                     (void*)*addr, (void*)R_RIP, (unsigned)Peek8( *addr, -1 ),
+                     (unsigned)(unsigned char)bridge->S, (unsigned)(unsigned char)bridge->C,
+                     IsBridgeSignature( bridge->S, bridge->C ) );
+    }
     if (IsBridgeSignature(bridge->S, bridge->C)) { // Signature for "Out of x86 door"
         *addr += 2;
         uintptr_t a = F64(addr);
