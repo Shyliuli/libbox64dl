@@ -23,6 +23,63 @@ void* cb = box64_callback(host_fn);                /* 宿主函数 → guest 可
 调用是每线程一个 emu、各带独立 guest 栈，`DynaCall` 不加全局锁；全局锁只保护
 `dlopen` / `dlsym` / bridge 注册这些改动共享结构的操作。
 
+## 从 guest 状态回到 host（Wine detach 安全）
+
+宿主 pthread 被 Wine attach（`__wine_attach_current_thread` / `__wine_adopt_thread`）后，
+是靠 PE bridge 的 `longjmp()` 回到宿主栈的；这条路径绕过了 `DynaCall` 自己的寄存器恢复
+（`dynarec.c`：只有正常返回才写回保存的 `old_rsp`）。于是该线程的 emu 会留下两个指向
+Wine 映射的脏字段：
+
+- `R_RSP` 仍在 Wine 的 TEB PE 栈上；
+- guest GS（`emu->segs_offs[_GS]`）仍指向 Wine TEB。
+
+而 Wine 的 `__wine_detach_current_thread()` 恰好要释放这两个映射，并且它的 stack guard
+会拒绝在“模拟 SP 仍位于 Wine 栈内”时执行。所以完整的一次 Wine detach 是三步，顺序不能颠倒：
+
+1. **先跑 PE 侧**：在 TEB / guest GS 还有效时，通过引擎在该线程上调用 PE
+   `ntdll.dll!LdrShutdownThread`（DLL_THREAD_DETACH / FLS / PE TLS 释放）；
+2. **再切 Box64 状态**：就是下面这两步里的 prepare——把 RSP 切到 Box64 自己的 emu 栈、
+   清掉 guest GS；
+3. **最后调 Unix 侧**：`__wine_detach_current_thread()` 释放 TEB / thread_data /
+   server thread object / GS 绑定。
+
+`LdrShutdownThread` 不是 `__wine_detach_current_thread()` 的一部分，必须在第 2 步切栈之前
+跑完。下面是 Box64 侧第 2 步的用法：
+
+```c
+#include "libbox64_ext.h"
+
+box64_guest_state_t guest;
+/* 完整序列的第 2 步（宿主侧）：此时 PE LdrShutdownThread 已经跑完。把 RSP 切到
+   Box64 自己的 emu 栈、清掉 guest GS；失败（返回 -1）就不要调用下面的 unix
+   detach，线程保持原状。 */
+if (box64_detach_current_thread_guest(&guest) != 0) return -1;
+
+/* 第 3 步：通过引擎调 Unix 侧的 detach 导出；此时 SP 已不在 Wine 栈内。 */
+int32_t st = (int32_t)box64_call_regs(g.detach_current_thread, eg, ef);
+if (st != 0) {
+  /* unix detach 失败。PE 侧已经跑过就无法还原，restore 只能回滚切栈、补不回
+     PE 状态：线程按 spent 处理，不要再 restore/retry。 */
+  return -1;
+}
+/* st == 0：线程已经 FOREIGN，保留快照但不要再 restore。 */
+```
+
+`box64_detach_current_thread_guest_restore()` 只在 detach 尚未跑过 PE
+`LdrShutdownThread` 时才有意义：它回滚的是这一次切栈（把 guest RSP/GS 放回去），
+不能撤销已经发生的 PE 线程清理。
+
+`box64_prepare_detach_current_thread()` 是同一调用的正式名字（`box64_detach_current_thread_guest()`
+是兼容别名）。切换点不是猜出来的地址：用的是 `emu->init_stack + emu->size_stack`，即
+`internalX64Setup()` 为该 emu 记录的栈，`box64_ensure_emu()` 下就是 `new_x64emu()` 分配并
+`setProtection_stack()` 登记的 8 MiB 映射；函数按引擎入口同样的 16 字节对齐取栈顶，并用
+`getProtection_fast()` 校验该区域是活的、可写的 Box64 映射，不满足就 fail-closed 返回 -1、
+不改任何字段。整个过程不分配、不释放任何栈（Wine 的栈由 Wine 的 detach 导出释放，Box64
+的 emu 栈跟随 emu 到线程析构），Wine 侧 stack guard 一行未动。
+
+验证：`make -C libbox64dl test-detach-guest`。它不需要 Wine，直接建真实 context/emu，
+把 emu 摆成 attach 之后的脏状态，断言切换、回滚、无 emu 线程 no-op 与 fail-closed 路径。
+
 ## 运行时 trampoline
 
 guest 的函数指针不能交给宿主去调——宿主会当成本地代码跳进去。常规做法是预先静态

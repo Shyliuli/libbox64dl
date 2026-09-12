@@ -38,7 +38,7 @@ CMAKE_PIC := $(CMAKE_COMMON) -DLARCH64_DYNAREC=$(PIC_DYNAREC) \
 	-DCMAKE_C_FLAGS="-fPIC -ftls-model=global-dynamic" \
 	-DCMAKE_ASM_FLAGS="-fPIC"
 
-.PHONY: all static pic patch unpatch graft plugins test clean distclean rust rust-static \
+.PHONY: all static pic patch unpatch graft plugins test test-detach-guest test-reset-stack clean distclean rust rust-static \
 	rust-pic cli
 
 all: static pic
@@ -46,6 +46,40 @@ all: static pic
 # The thunk pool is self-contained, so it tests without building box64.
 test: build/test_thunk
 	./build/test_thunk
+
+# White-box check of the host-side detach repair (libbox64_ext.h). It needs
+# the full engine — it reads the real x64emu_t fields — but no wine: it fakes
+# the post-attach RSP/GS shape and asserts the switch, its rollback and its
+# fail-closed path. Links exactly like a host embedder.
+TEST_DETACH_GUEST := $(ROOT)/build/test_detach_guest
+
+$(TEST_DETACH_GUEST): tests/test_detach_guest.c $(BUILD_STATIC)/libbox64.a $(RUST_STATIC)
+	@mkdir -p $(dir $@)
+	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
+		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_detach_guest.c \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--no-whole-archive $(RUST_STATIC) \
+		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
+
+test-detach-guest: $(TEST_DETACH_GUEST)
+	$(TEST_DETACH_GUEST)
+
+# White-box check of the clean-guest-stack repair (libbox64_ext.h): the
+# post-attach bridge-longjmp RSP is normalised onto the thread's own PE stack
+# top while GS/TEB are kept. Same fake-TEB / real-engine link shape as the
+# detach check above, so the emu fields are the real ones.
+TEST_RESET_STACK := $(ROOT)/build/test_reset_stack
+
+$(TEST_RESET_STACK): tests/test_reset_stack.c $(BUILD_STATIC)/libbox64.a $(RUST_STATIC)
+	@mkdir -p $(dir $@)
+	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
+		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_reset_stack.c \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--no-whole-archive $(RUST_STATIC) \
+		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
+
+test-reset-stack: $(TEST_RESET_STACK)
+	$(TEST_RESET_STACK)
 
 # Rust facade. build.rs decides the flavor itself (feature/env), so these
 # targets only ensure the matching box64 archive is up to date first. Each
