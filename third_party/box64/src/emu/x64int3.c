@@ -119,9 +119,14 @@ void x64Int3(x64emu_t* emu, uintptr_t* addr)
         return;
     }
     onebridge_t* bridge = (onebridge_t*)(*addr-1);
+#if 0
+    /* Bridge trap diagnosis, disabled: it established the rule that box64 must
+     * report the trapping PC as int3+1 for the record to be found at *addr-1,
+     * and that the signature check itself was never the failing step (see
+     * winedl/docs/ensure-wine-design.md 12.3). Re-enable and set
+     * BOX64_BRIDGE_DEBUG when revisiting the still-unexplained alignment fault.
+     */
     {
-        /* winedl investigation: which address does box64 report when a bridge
-         * int3 traps, and does the record signature check out? */
         static int dbg = -1;
         if (dbg < 0) dbg = getenv( "BOX64_BRIDGE_DEBUG" ) != NULL;
         if (dbg)
@@ -131,6 +136,7 @@ void x64Int3(x64emu_t* emu, uintptr_t* addr)
                      (unsigned)(unsigned char)bridge->S, (unsigned)(unsigned char)bridge->C,
                      IsBridgeSignature( bridge->S, bridge->C ) );
     }
+#endif
     if (IsBridgeSignature(bridge->S, bridge->C)) { // Signature for "Out of x86 door"
         *addr += 2;
         uintptr_t a = F64(addr);
