@@ -1,0 +1,299 @@
+# libbox64dl patch 0005: per-entry signal-mask policy for the embedded call path.
+#
+# Every top-level guest call enters EmuRun(), whose SigSetJmp() used the literal
+# savesigs=1. On glibc that makes __sigjmp_save() issue an rt_sigprocmask syscall
+# per call just to snapshot a mask the no-signal path never reads. The policy is
+# now chosen per *library entry scope* and carried on the emu:
+#
+#   requested_call_policy  the policy for the frame DynaCallCore is about to
+#                          enter. DynaCallCore -- the one engine entry every
+#                          embedder funnels through (box64_callN/plan/regs, an
+#                          arity stub, RunFunctionWithEmu, a wrapped re-entry,
+#                          the guest signal handler's DynaCall) -- resolves it
+#                          from the real target address and restores the
+#                          enclosing value afterwards. EmuRun resolves it from
+#                          the entry PC only when it is entered without a
+#                          DynaCall (INHERIT, -1).
+#   active_jmpbuf_policy   the policy of the frame emu->jmpbuf points at.
+#
+# EmuRun arms a frame with `savemask = (policy == COMPAT)`, records the policy in
+# active_jmpbuf_policy, and restores the enclosing scope's jmpbuf/policy on
+# return. A nested EmuRun whose requested policy differs from the live frame's
+# takes a NEW frame, so the frame a signal resumes into and the policy its mask
+# is restored under always agree; when the policies are equal the original
+# nested-sharing behaviour is kept. Every signal-driven siglongjmp() resume
+# restores the mask under emu->active_jmpbuf_policy (never a global): a COMPAT
+# frame is a no-op (siglongjmp restores the saved mask M0); a FAST frame
+# restores the mask the kernel recorded in the delivered signal's ucontext (M1).
+#
+# Environment library rules are bound in RunElfInit, before any constructor
+# guest call runs, so a rule covers a library's constructors as well as later
+# calls. An explicit box64_signal_policy_set_library() applies to later host
+# entries; by then the constructors have already run under the environment or
+# global default policy.
+#
+# Default is FAST. `none` is parsed only in order to be refused: dynarec's
+# protectDB/auto-SMC and guest fatal-signal/SEH emulation depend on the four
+# handlers. Vendor-only change, kept here so third_party/box64 stays
+# re-syncable; the Makefile patch target applies it.
+--- a/src/emu/x64emu_private.h
++++ b/src/emu/x64emu_private.h
+@@ -150,6 +150,13 @@
+     void*       res_state_32;  //32bits version of res_state
+     void*       res_state_64;
+     #endif
++    /* libbox64dl patch 0005: signal-mask policy scope.
++     * requested_call_policy is BOX64DL_POLICY_COMPAT/FAST when a host entry
++     * selected the target library's policy, or -1 (INHERIT) to resolve from the
++     * entry PC. active_jmpbuf_policy is the policy of the frame emu->jmpbuf
++     * currently points at; the signal handler restores the mask under it. */
++    int         requested_call_policy;
++    int         active_jmpbuf_policy;
+ } x64emu_t;
+ 
+ #define EMUTYPE_NONE    0
+--- a/src/emu/x64emu.c
++++ b/src/emu/x64emu.c
+@@ -90,6 +90,11 @@
+     emu->mxcsr.x32 = 0x1f80;
+     // want some new jmpbuf for error recovery
+     emu->flags.need_jmpbuf = 1;
++    /* libbox64dl patch 0005: a fresh emu has no scope selected yet, so EmuRun
++     * resolves the policy from its entry PC; no frame is live yet (0 = COMPAT,
++     * which is only observed before the first frame). */
++    emu->requested_call_policy = -1; /* BOX64DL_POLICY_INHERIT */
++    emu->active_jmpbuf_policy = 0;
+ }
+ 
+ EXPORTDYN
+--- a/src/dynarec/dynarec.c
++++ b/src/dynarec/dynarec.c
+@@ -28,6 +28,17 @@
+ #endif
+ 
+ extern int running32bits;
++
++/* libbox64dl patch 0005: per-entry signal-mask policy (src/signal_policy.c).
++ * Host entry points publish the target library's policy in
++ * emu->requested_call_policy; anything else (a constructor, a DynaCall from
++ * wrapped code) leaves it BOX64DL_POLICY_INHERIT (-1) and EmuRun resolves it
++ * from the entry PC. The frame records the policy it was armed with in
++ * emu->active_jmpbuf_policy, which is what the signal handler restores under. */
++extern int box64dl_sig_dbg_on;
++extern void box64dl_sig_dbg_note(int saved);
++extern int box64dl_signal_policy_for_addr(uintptr_t addr);
++
+ #ifdef DYNAREC
+ void* LinkNext(x64emu_t* emu, uintptr_t addr, void* x2, uintptr_t* x3)
+ {
+@@ -167,6 +178,15 @@
+     uint64_t old_rdi = 0;
+     uint64_t old_rsi = 0;
+     uint64_t old_rbp = 0;
++    /* libbox64dl patch 0005: the per-library signal policy is selected HERE, at
++     * the one entry every embedder funnels through (box64_callN/plan/regs, an
++     * arity stub, RunFunctionWithEmu, a wrapped re-entry, the guest signal
++     * handler's DynaCall). `addr` is the real guest target, so a callback that
++     * re-enters another library gets that library's policy, not the outer
++     * scope's. DynaCallCore owns the save/restore, so no caller repeats it and
++     * EmuRun only resolves when it is entered without a DynaCall (INHERIT). */
++    int old_req = emu->requested_call_policy;
++    emu->requested_call_policy = box64dl_signal_policy_for_addr(addr);
+     if(!abi_mode) {
+         old_rbx = R_RBX;
+         old_rdi = R_RDI;
+@@ -207,6 +227,8 @@
+         R_RSP = old_rsp;
+         R_RIP = old_rip;  // and set back instruction pointer
+     }
++    /* patch 0005: restore the enclosing scope (the longjmp branch included). */
++    emu->requested_call_policy = old_req;
+ }
+ 
+ void DynaCall(x64emu_t* emu, uintptr_t addr, int no_alt)
+@@ -252,21 +274,40 @@
+     JUMPBUFF jmpbuf[1] = {0};
+     int skip = 0;
+     JUMPBUFF *old_jmpbuf = emu->jmpbuf;
++    /* libbox64dl patch 0005: the policy this EmuRun scope runs under. A host
++     * entry already published it on the emu; otherwise it is INHERIT and is
++     * resolved once, from the entry PC, through the O(1) cache. `old_*` keep
++     * the enclosing frame's state so a nested EmuRun restores it on return. */
++    int req = emu->requested_call_policy;
++    int old_active = emu->active_jmpbuf_policy;
++    int old_req = emu->requested_call_policy;
++    int savemask;
++    if (req == -1 /* BOX64DL_POLICY_INHERIT */)
++        req = box64dl_signal_policy_for_addr(R_RIP);
++    savemask = (req == 0 /* BOX64DL_POLICY_COMPAT */) ? 1 : 0;
+     #if defined(RV64) || defined(PPC64LE)
+     uintptr_t old_savesp = emu->xSPSave;
+     #endif
+     int is32bits = (emu->segs[_CS]==0x23);
+     while(!(emu->quit)) {
+-        if(!emu->jmpbuf || (emu->flags.need_jmpbuf && emu->jmpbuf!=jmpbuf)) {
++        /* patch 0005: also take a new frame when the requested policy differs
++         * from the live frame's. Without this, a nested COMPAT entry inside a
++         * FAST frame (or the reverse) would share the outer jmpbuf and the
++         * handler would restore under one policy while resuming into a frame
++         * armed with the other. Equal policies keep the original sharing. */
++        if(!emu->jmpbuf || (emu->flags.need_jmpbuf && emu->jmpbuf!=jmpbuf)
++           || emu->active_jmpbuf_policy != req) {
+             emu->jmpbuf = jmpbuf;
+             #if defined(RV64) || defined(PPC64LE)
+             emu->old_savedsp = emu->xSPSave;
+             #endif
+             emu->flags.jmpbuf_ready = 1;
++            emu->active_jmpbuf_policy = req;
++            if (box64dl_sig_dbg_on) box64dl_sig_dbg_note(savemask);
+             #ifdef ANDROID
+-            if ((skip = SigSetJmp(*(JUMPBUFF*)emu->jmpbuf, 1)))
++            if ((skip = SigSetJmp(*(JUMPBUFF*)emu->jmpbuf, savemask)))
+             #else
+-            if ((skip = SigSetJmp(emu->jmpbuf, 1)))
++            if ((skip = SigSetJmp(emu->jmpbuf, savemask)))
+             #endif
+             {
+                 dynarec_log(LOG_DEBUG, "Setjmp EmuRun, fs=0x%x will %sskip dynarec next\n", emu->segs[_FS], (skip==3)?"not ":"");
+@@ -367,8 +408,10 @@
+         if(emu->flags.need_jmpbuf)
+             emu->quit = 0;
+     }
+-    // clear the setjmp
++    // clear the setjmp and restore the enclosing scope's frame + policy
+     emu->jmpbuf = old_jmpbuf;
++    emu->active_jmpbuf_policy = old_active;
++    emu->requested_call_policy = old_req;
+     #if defined(RV64) || defined(PPC64LE)
+     emu->xSPSave = old_savesp;
+     #endif
+--- a/src/libtools/signals.c
++++ b/src/libtools/signals.c
+@@ -47,6 +47,15 @@
+ 
+ #include "signal_private.h"
+ 
++/* libbox64dl patch 0005: every resume out of a handler must put the signal mask
++ * back under the policy of the frame it siglongjmps into. A COMPAT frame is a
++ * no-op here (siglongjmp restores the saved mask); a FAST frame restores the
++ * mask the kernel recorded in the delivered signal's ucontext. The policy is
++ * read from the emu's live frame, never from a global, so mixed nested scopes
++ * restore the right mask. Kept at the top of the file, away from the patch-0003
++ * hunks, so `make patch`'s reverse-dry-run checks stay clean. */
++extern void box64dl_signal_mask_restore(int active_policy, const void* ucntx);
++
+ static void sigstack_destroy(void* p)
+ {
+     x64_stack_t *ss = (x64_stack_t*)p;
+@@ -520,6 +529,8 @@
+             #ifdef DYNAREC
+             dynablock_leave_runtime((dynablock_t*)cur_db);
+             #endif
++            /* patch 0005: restore the mask under this frame's own policy. */
++            box64dl_signal_mask_restore(emu->active_jmpbuf_policy, ucntx);
+             #ifdef ANDROID
+             siglongjmp(*emu->jmpbuf, skip);
+             #else
+@@ -851,6 +862,8 @@
+                         #if defined(RV64) || defined(PPC64LE)
+                         emu->xSPSave = emu->old_savedsp;
+                         #endif
++                        /* patch 0005: restore the mask under this frame's own policy. */
++                        box64dl_signal_mask_restore(emu->active_jmpbuf_policy, ucntx);
+                         #ifdef ANDROID
+                         siglongjmp(*(JUMPBUFF*)emu->jmpbuf, 3);
+                         #else
+@@ -925,6 +938,8 @@
+                 #if defined(RV64) || defined(PPC64LE)
+                 emu->xSPSave = emu->old_savedsp;
+                 #endif
++                /* patch 0005: restore the mask under this frame's own policy. */
++                box64dl_signal_mask_restore(emu->active_jmpbuf_policy, ucntx);
+                 #ifdef ANDROID
+                 siglongjmp(*(JUMPBUFF*)emu->jmpbuf, 2);
+                 #else
+--- a/src/libtools/signal32.c
++++ b/src/libtools/signal32.c
+@@ -485,6 +485,13 @@
+ int write_opcode(uintptr_t rip, uintptr_t native_ip, int is32bits);
+ #define is_memprot_locked (1<<1)
+ #define is_dyndump_locked (1<<8)
++
++/* libbox64dl patch 0005: BOX32 sibling of the signals.c resume sites. BOX32 is
++ * off in the embedded build, but the same siglongjmp(emu->jmpbuf) resume must
++ * restore the mask under the frame's own policy (COMPAT: no-op, siglongjmp
++ * restores it; FAST: restore the delivered ucontext mask). */
++extern void box64dl_signal_mask_restore(int active_policy, const void* ucntx);
++
+ int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db)
+ {
+     int Locks = unlockMutex();
+@@ -771,6 +778,8 @@
+             #ifdef DYNAREC
+             dynablock_leave_runtime((dynablock_t*)cur_db);
+             #endif
++            /* patch 0005: restore the mask under this frame's own policy. */
++            box64dl_signal_mask_restore(emu->active_jmpbuf_policy, ucntx);
+             #ifdef ANDROID
+             siglongjmp(*emu->jmpbuf, skip);
+             #else
+--- a/src/elfs/elfloader.c
++++ b/src/elfs/elfloader.c
+@@ -38,6 +38,9 @@
+ #include "dictionnary.h"
+ #include "symbols.h"
+ #include "cleanup.h"
++/* libbox64dl patch 0005: environment library rules (BOX64DL_SIGNAL_LIBRARY_RULES)
++ * bound to a library before its constructors run; see RunElfInit below. */
++#include "libbox64_signal.h"
+ #include "globalsymbols.h"
+ #include "elfhacks.h"
+ #ifdef DYNAREC
+@@ -452,6 +455,14 @@
+ 
+ void FreeElfMemory(elfheader_t* head)
+ {
++    /* libbox64dl patch 0005: the image is about to be unmapped, so drop its
++     * signal-policy range HERE -- the single point every unload path reaches,
++     * dependencies included (a guest dlclose of a parent that pulls a child, a
++     * host box64_dlclose, context teardown). Clearing before the mapping goes
++     * also prevents an address reuse from inheriting the old policy. The
++     * library's destructors have already run by now, under the policy that was
++     * in force, so this does not clear early. */
++    box64dl_signal_lib_range_clear((uintptr_t)GetBaseAddress(head));
+     if(head->multiblock_n) {
+ #ifdef DYNAREC
+         for(int i=0; i<head->multiblock_n; ++i) {
+@@ -1223,6 +1234,32 @@
+ {
+     if(!h || h->init_done)
+         return;
++    /* libbox64dl patch 0005: bind this image's signal policy from
++     * BOX64DL_SIGNAL_LIBRARY_RULES before any constructor guest call runs, so
++     * an environment rule covers constructors (their dependencies register in
++     * the recursive RunElfInit calls below). The range is a plain
++     * (lo,hi,policy) value; a library with no matching rule registers nothing
++     * and keeps the no-override fast path. An explicit
++     * box64_signal_policy_set_library() applies to later calls; by then these
++     * constructors have already run under the environment/default policy. */
++    {
++        uintptr_t lo = (uintptr_t)GetBaseAddress(h);
++        uint32_t sz = GetBaseSize(h);
++        const char* path = (ElfPath(h) && *ElfPath(h)) ? ElfPath(h) : ElfName(h);
++        int pol = box64dl_signal_lib_rule_lookup(path);
++        if(lo && sz && pol >= 0 && box64dl_signal_lib_range_set(lo, lo + sz, pol) != 0) {
++            /* A configured policy must never silently degrade to the global
++             * default. The table is bounded; at the bound, refuse the load
++             * outright rather than run its constructors under the wrong policy.
++             * This is a cold config path (guest execution is serialized with
++             * it), so failing hard is the honest outcome. */
++            fprintf(stderr,
++                    "[libbox64dl] signal policy for %s NOT applied (override "
++                    "table full); refusing to run it under the wrong policy\n",
++                    path ? path : "(unknown)");
++            abort();
++        }
++    }
+     // adjust elf Dynamic section header with the delta of the load address if needed
+     // but do not adjust if there is no libs loaded as it will use it's own loader to do similar stuffs
+     if(!box64_nolibs) PatchLoadedDynamicSection(h);

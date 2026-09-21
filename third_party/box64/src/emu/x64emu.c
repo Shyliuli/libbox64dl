@@ -90,6 +90,11 @@ static void internalX64Setup(x64emu_t* emu, box64context_t *context, uintptr_t s
     emu->mxcsr.x32 = 0x1f80;
     // want some new jmpbuf for error recovery
     emu->flags.need_jmpbuf = 1;
+    /* libbox64dl patch 0005: a fresh emu has no scope selected yet, so EmuRun
+     * resolves the policy from its entry PC; no frame is live yet (0 = COMPAT,
+     * which is only observed before the first frame). */
+    emu->requested_call_policy = -1; /* BOX64DL_POLICY_INHERIT */
+    emu->active_jmpbuf_policy = 0;
 }
 
 EXPORTDYN

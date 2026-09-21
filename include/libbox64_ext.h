@@ -212,6 +212,68 @@ BOX64_API int box64_reset_current_thread_guest_stack(uint64_t stack_top);
 BOX64_API int box64_current_thread_teb_stack_top(uint64_t* top);
 BOX64_API int box64_reset_current_thread_guest_stack_from_teb(void);
 
+/*
+ * ------------------------------------------------------------------
+ * Foreign-loader image policy (PE / any non-ELF guest loader)
+ * ------------------------------------------------------------------
+ *
+ * The per-library signal policy keys on a guest image's host address range.
+ * box64_dlopen() registers ELF images itself (RunElfInit), but a foreign loader
+ * (the Wine/PE path) owns its modules and must register them explicitly. These
+ * four entry points are the whole seam and reuse the same range registry, so an
+ * ELF image and a PE module can never disagree about an address.
+ *
+ * SCOPE: a PE module is NOT registered automatically -- the engine never sees
+ * its load. A foreign loader that wants a module to follow a
+ * BOX64DL_SIGNAL_LIBRARY_RULES rule or an explicit policy registers its
+ * (base, size) here and clears it when the image is really unmapped. The
+ * bundled winedl adapter does exactly this for every module loaded through
+ * winedl_dlopen() (see winedl.h / winedl/include); this API is what makes PE
+ * per-module policy possible, not a statement that PE is unsupported. DllMain /
+ * PE TLS still run under whatever policy is in force when the loader calls into
+ * the engine; this API does not move them (they already run before any
+ * post-dlopen set).
+ *
+ * CONFIG CONTRACT: same as box64_signal_policy_set_library() -- a cold
+ * operation; no guest entry may run concurrently on any thread, including a
+ * same-thread signal handler. `lo + size` must not overflow and `size` must be
+ * non-zero, so a raw/unknown pointer is refused rather than wrapping.
+ */
+BOX64_API int box64_signal_policy_set_range(uintptr_t lo, size_t size, int policy);
+/* Effective policy for `addr` (registered range, environment rule or the global
+ * default). Always a policy value; no error slot is used. */
+BOX64_API int box64_signal_policy_get_address(uintptr_t addr);
+/* Drop the range registered for `lo` (call it when the image is really
+ * unmapped). Safe when nothing is registered; a zero base is ignored. */
+BOX64_API void box64_signal_policy_clear_range(uintptr_t lo);
+/* Match `name` against BOX64DL_SIGNAL_LIBRARY_RULES: the policy, or -1 when no
+ * rule matches (also -1 for NULL). A malformed rules variable already fails
+ * box64_lib_init(); this is a pure lookup. */
+BOX64_API int box64_signal_policy_rule_for_name(const char* name);
+
+/*
+ * ------------------------------------------------------------------
+ * Abandoned engine call frame (host non-local unwind)
+ * ------------------------------------------------------------------
+ *
+ * A host non-local jump (winedl's inline-boot bridge longjmp) can hand control
+ * back to the host stack while unwinding across the engine's EmuRun frame, so
+ * EmuRun's epilogue never runs and the emu keeps a residual emu->jmpbuf that is
+ * no longer a live recovery point. A later call whose policy matches would then
+ * share that residue instead of arming a fresh frame. This call removes the
+ * residue: it restores the no-frame state EmuRun's epilogue would have written
+ * (emu->jmpbuf = NULL, active/requested policy = INHERIT) so the next call arms
+ * its own frame.
+ *
+ * PRECONDITION: call it on the thread whose frame was abandoned, AFTER the
+ * longjmp has landed back on the host stack and while NO engine call is
+ * executing on that thread (not from a bridge callback or any live guest
+ * frame). It is a no-op when the thread has no emu and never creates one; it
+ * does not read or clear the error slot and does not touch jmpbuf_ready. Cost
+ * is a few stores; under FAST the next call re-arms without a syscall.
+ */
+BOX64_API void box64_call_frame_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

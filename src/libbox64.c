@@ -21,7 +21,9 @@ int unittest(int argc, const char** argv) {
 #include <unistd.h>
 
 #include "box64dl_thunk.h"
+#include "libbox64_diag.h"
 #include "libbox64_ext.h"
+#include "libbox64_signal.h"
 
 #include "box64context.h"
 #include "box64cpu.h"
@@ -110,18 +112,188 @@ static void set_err_fmt(const char* fmt, ...) {
  * both. */
 
 BOX64_API void box64_lib_fini(void) {
-  printf("[box64] box64_lib_fini enter.\n");
+  BOX64_DIAG("[box64] box64_lib_fini enter.\n");
   lock();
   if (!box64_is_ready()) {
     unlock();
     return;
   }
   endBox64();
+  /* endBox64 -> fini_signal_helper() now restores the pre-box64 host actions it
+   * saved at init (patches/0006) instead of resetting the four signals to
+   * SIG_DFL, so a host handler (V8's wasm trap handler among them) survives
+   * fini. It only touches a signal whose disposition is still box64's own. */
   my_context = NULL;
   unlock();
 }
 
 BOX64_API int box64_lib_ready(void) { return box64_is_ready(); }
+
+/*
+ * Signal policy (include/libbox64.h). The global default is one-shot and must
+ * happen before box64_lib_init(): the engine publishes it into a plain int
+ * before any guest call can run. A call after publication fails and changes
+ * nothing. Per-library overrides are separate (below) and may be changed while
+ * the engine is up; see the header for the sequential-config contract.
+ */
+BOX64_API int box64_signal_policy_set(int policy) {
+  if (box64dl_signal_policy_request(policy) != 0) {
+    set_err("box64_signal_policy_set: invalid policy or already published");
+    return -1;
+  }
+  return 0;
+}
+
+BOX64_API int box64_signal_policy_get(void) {
+  return box64dl_signal_policy_mode();
+}
+
+/* Resolve an open handle to its loaded image range. Returns 0 and fills
+ * lo/size, or -1 with the error slot set. A handle that is not a live box64
+ * dlopen handle, or a wrapped library with no ELF image, is refused: neither
+ * has a guest address range to key a policy on. */
+static int handle_image_range(void* handle, uintptr_t* lo, uint32_t* size) {
+  library_t* lib;
+  elfheader_t* elf;
+  if (!my_context) {
+    set_err("box64_signal_policy: not initialized");
+    return -1;
+  }
+  lock();
+  lib = dl_get_library(handle);
+  if (!lib || lib == (library_t*)-1LL) {
+    unlock();
+    set_err("box64_signal_policy: invalid or closed handle");
+    return -1;
+  }
+  elf = GetElf(lib);
+  if (!elf) {
+    unlock();
+    set_err("box64_signal_policy: library has no ELF image (wrapped)");
+    return -1;
+  }
+  *lo = (uintptr_t)GetBaseAddress(elf);
+  *size = GetBaseSize(elf);
+  unlock();
+  if (!*lo || !*size) {
+    set_err("box64_signal_policy: library image range is empty");
+    return -1;
+  }
+  return 0;
+}
+
+/*
+ * Per-library signal policy (include/libbox64.h). An explicit policy here
+ * takes precedence over an environment rule for the same library, which in
+ * turn takes precedence over the global default. The range is registered under
+ * the library's image base, so the hot resolver reaches it through its O(1)
+ * cache. Constructors have already run by the time an embedder can obtain a
+ * handle, so this applies to later host entries only; an environment rule is
+ * what covers constructors (bound in the engine's RunElfInit).
+ */
+BOX64_API int box64_signal_policy_set_library(void* handle, int policy) {
+  uintptr_t lo = 0;
+  uint32_t size = 0;
+  if (policy != BOX64_SIGNAL_POLICY_COMPAT && policy != BOX64_SIGNAL_POLICY_FAST) {
+    set_err("box64_signal_policy_set_library: invalid policy");
+    return -1;
+  }
+  if (!box64_is_ready()) {
+    set_err("box64_signal_policy_set_library: not initialized");
+    return -1;
+  }
+  if (handle_image_range(handle, &lo, &size) != 0) return -1;
+  if (box64dl_signal_lib_range_set(lo, lo + size, policy) != 0) {
+    set_err("box64_signal_policy_set_library: policy table full");
+    return -1;
+  }
+  set_err(NULL);
+  return 0;
+}
+
+/* The effective policy for an open library: an explicit override or a matching
+ * environment rule if one applies, otherwise the global default. */
+BOX64_API int box64_signal_policy_get_library(void* handle) {
+  uintptr_t lo = 0;
+  uint32_t size = 0;
+  if (!box64_is_ready()) {
+    set_err("box64_signal_policy_get_library: not initialized");
+    return -1;
+  }
+  if (handle_image_range(handle, &lo, &size) != 0) return -1;
+  return box64dl_signal_policy_for_addr(lo);
+}
+
+/*
+ * Foreign-loader image policy (include/libbox64_ext.h). The Wine/PE path owns
+ * its modules, so it registers their (base, size) directly; the same range
+ * registry serves ELF and PE addresses. Cold config only: no guest entry may
+ * run on any thread while these execute.
+ */
+BOX64_API int box64_signal_policy_set_range(uintptr_t lo, size_t size,
+                                            int policy) {
+  if (!box64_is_ready()) {
+    set_err("box64_signal_policy_set_range: not initialized");
+    return -1;
+  }
+  if (!lo || !size || lo > (uintptr_t)-1 - (uintptr_t)size) {
+    set_err("box64_signal_policy_set_range: invalid/overflowing range");
+    return -1;
+  }
+  if (policy != BOX64_SIGNAL_POLICY_COMPAT && policy != BOX64_SIGNAL_POLICY_FAST) {
+    set_err("box64_signal_policy_set_range: invalid policy");
+    return -1;
+  }
+  if (box64dl_signal_lib_range_set(lo, lo + (uintptr_t)size, policy) != 0) {
+    set_err("box64_signal_policy_set_range: policy table full");
+    return -1;
+  }
+  set_err(NULL);
+  return 0;
+}
+
+BOX64_API int box64_signal_policy_get_address(uintptr_t addr) {
+  /* Always a mode: a foreign loader asks for the effective policy of a module
+   * address. With no registered range/rule it is the global default. */
+  return box64dl_signal_policy_for_addr(addr);
+}
+
+BOX64_API void box64_signal_policy_clear_range(uintptr_t lo) {
+  if (!lo) return;
+  box64dl_signal_lib_range_clear(lo);
+}
+
+BOX64_API int box64_signal_policy_rule_for_name(const char* name) {
+  if (!name || !*name) return -1;
+  return box64dl_signal_lib_rule_lookup(name);
+}
+
+/*
+ * Remove a call frame abandoned by a host non-local jump (include/libbox64_ext.h).
+ * Restores the exact no-frame state EmuRun's epilogue would have written, so the
+ * next call arms a fresh frame. No emu -> no-op (never fabricates one); the
+ * error slot and jmpbuf_ready are deliberately untouched.
+ */
+BOX64_API void box64_call_frame_reset(void) {
+  x64emu_t* emu = thread_peek_emu();
+  if (!emu) return;
+  emu->jmpbuf = NULL;
+  emu->active_jmpbuf_policy = BOX64DL_POLICY_INHERIT;
+  emu->requested_call_policy = BOX64DL_POLICY_INHERIT;
+}
+
+/* Diagnostics only; the per-call counters are per-thread and non-atomic. */
+BOX64_API void box64_signal_stats_enable(int on) {
+  box64dl_sig_dbg_on = on ? 1 : 0;
+}
+
+BOX64_API void box64_signal_stats(box64_signal_stats_t* out) {
+  if (!out) return;
+  out->setjmp_saves = box64dl_sig_dbg_saves();
+  out->setjmp_skips = box64dl_sig_dbg_skips();
+  out->mask_restores = box64dl_sig_dbg_restores();
+  out->publishes = box64dl_sig_dbg_publishes();
+}
 
 BOX64_API void box64_set_wine_mode(void) {
   extern int box64_wine;
@@ -131,7 +303,7 @@ BOX64_API void box64_set_wine_mode(void) {
 BOX64_API void* box64_dlopen(const char* path, int flags) {
   x64emu_t* emu;
   void* handle;
-  printf("[box64] box64_dlopen path=%s.\n", path ? path : "(null)");
+  BOX64_DIAG("[box64] box64_dlopen path=%s.\n", path ? path : "(null)");
   if (!box64_is_ready() && box64_lib_init() != 0) return NULL;
   if (!path) {
     set_err("box64_dlopen: NULL path");
@@ -159,7 +331,7 @@ BOX64_API void* box64_dlopen(const char* path, int flags) {
 BOX64_API void* box64_dlsym(void* handle, const char* name) {
   x64emu_t* emu;
   void* p;
-  printf("[box64] box64_dlsym name=%s.\n", name ? name : "(null)");
+  BOX64_DIAG("[box64] box64_dlsym name=%s.\n", name ? name : "(null)");
   if (!box64_is_ready()) {
     set_err("not initialized");
     return NULL;
@@ -188,7 +360,7 @@ BOX64_API void* box64_dlsym(void* handle, const char* name) {
 BOX64_API int box64_dlclose(void* handle) {
   x64emu_t* emu;
   int rc;
-  printf("[box64] box64_dlclose handle=%p.\n", handle);
+  BOX64_DIAG("[box64] box64_dlclose handle=%p.\n", handle);
   uintptr_t lo = 0, hi = 0;
   if (!box64_is_ready()) return -1;
   lock();
@@ -212,7 +384,10 @@ BOX64_API int box64_dlclose(void* handle) {
 
   rc = my_dlclose(emu, handle);
 
-  /* dlclose only drops a reference; release only once the ELF is really gone. */
+  /* dlclose only drops a reference; release trampolines only once the ELF is
+   * really gone. The signal-policy range is NOT cleared here: it is cleared at
+   * the single real unmap point (FreeElfMemory), so a dependency unloaded by a
+   * guest my_dlclose is covered too, not just this top-level handle. */
   if (hi > lo && !FindElfAddress(my_context, lo))
     box64dl_thunk_release_range(lo, hi);
 
@@ -221,12 +396,92 @@ BOX64_API int box64_dlclose(void* handle) {
 }
 
 BOX64_API const char* box64_dlerror(void) { return box64_get_error(); }
+
+/* The seam carries one SSE register as 16 bytes, which must match the engine's
+ * sse_regs_t exactly; a mismatch would make box64_call_plan() write a partial
+ * register. */
+_Static_assert(sizeof(box64_fpr_t) == sizeof(sse_regs_t),
+               "box64_fpr_t must match sse_regs_t");
+
+/*
+ * Shared prologue fast path for the fixed-arity call entries (and the reason
+ * the old entries no longer repeat the ensure): thread_peek_emu() is a bare
+ * pthread_getspecific (patches/0003), so a thread that already has an emu can
+ * start the guest call without taking the shared recursive context lock,
+ * without re-checking readiness (a live per-thread emu implies a live
+ * context) and without a second box64_ensure_emu(). A thread WITHOUT an emu
+ * still takes the original slow path unchanged — the per-thread ensure is
+ * preserved, not removed.
+ */
+static x64emu_t* call_entry(const char* who, void* sym) {
+  x64emu_t* emu;
+  if (!sym) {
+    set_err_fmt("%s: NULL sym", who);
+    return NULL;
+  }
+  /* my_context is NULL before init and after box64_lib_fini(), while the Rust
+   * facade's ready Option can remain Some across fini; keying the fast path on
+   * my_context keeps a thread that still holds an emu from calling into a
+   * torn-down engine. It is a plain pointer load, so the hot path stays
+   * lock-free; box64_lib_init() populates it before any call can run. This is
+   * a SEQUENTIAL guard:
+   * box64_lib_fini() must not race calls on other threads, the same lifetime
+   * contract box64_call_regs() always had — it is not synchronisation. */
+  if (!my_context) {
+    set_err_fmt("%s: not initialized", who);
+    return NULL;
+  }
+  emu = thread_peek_emu();
+  if (emu) return emu;
+  if (!box64_is_ready()) {
+    set_err_fmt("%s: not initialized", who);
+    return NULL;
+  }
+  lock();
+  if (box64_ensure_emu() != 0) {
+    unlock();
+    return NULL; /* box64_ensure_emu() already recorded the reason */
+  }
+  emu = thread_get_emu();
+  unlock();
+  return emu;
+}
+
+/* Shared epilogue: the call ran, so a 0 return is unambiguously the guest's own
+ * RAX and not a refusal. (An error raised by a nested call during DynaCall
+ * belongs to that nested caller, which already read it.) */
+static uint64_t call_finish(x64emu_t* emu) {
+  set_err(NULL);
+  return R_RAX;
+}
+
+/* Align the outgoing RSP to the engine's entry convention: DynaCall's
+ * PushExit() subtracts 8, so RSP must be 16-aligned at DynaCall entry for the
+ * guest to see the ABI parity rsp % 16 == 8. Returns the caller's RSP for
+ * call_unwind(). Needed even on the no-stack path: a re-entrant call made from
+ * a bridge callback starts from the outer guest frame's RSP, whose parity is
+ * not the caller's. */
+static uint64_t call_align(x64emu_t* emu) {
+  uint64_t old = R_RSP;
+  R_RSP = old & ~(uint64_t)0xF;
+  return old;
+}
+
+/* Put the caller's RSP back on a normal return. On a guest longjmp DynaCall
+ * deliberately leaves the abandoned RSP in place, so it is kept (restoring
+ * would clobber the longjmp target's stack). */
+static void call_unwind(x64emu_t* emu, uint64_t old_rsp, uintptr_t old_ip) {
+  if (old_ip == R_RIP) R_RSP = old_rsp;
+}
+
 BOX64_API uint64_t box64_call_regs(void* sym, uint64_t* gregs, uint64_t* fregs) {
   x64emu_t* emu;
   int nn[] = {_DI, _SI, _DX, _CX, _R8, _R9};
   int i;
   uint64_t ret;
-  printf("[box64] box64_call_regs sym=%p.\n", sym);
+  uint64_t old_rsp;
+  uintptr_t old_ip;
+  BOX64_DIAG("[box64] box64_call_regs sym=%p.\n", sym);
   /* The return value is the guest's RAX, so 0 is a legitimate result; an
    * engine-level refusal ALSO returns 0. To keep the two distinguishable every
    * refusal below records the thread-local error slot, and a call that really
@@ -234,7 +489,8 @@ BOX64_API uint64_t box64_call_regs(void* sym, uint64_t* gregs, uint64_t* fregs) 
    * meaningful value (e.g. an NTSTATUS success) must read box64_dlerror() --
    * immediately, it is read-and-consume -- to tell "returned 0" from "never
    * ran". */
-  if (!box64_is_ready()) {
+  emu = thread_peek_emu();
+  if (!my_context || (!emu && !box64_is_ready())) {
     set_err("box64_call_regs: not initialized");
     return 0;
   }
@@ -242,28 +498,33 @@ BOX64_API uint64_t box64_call_regs(void* sym, uint64_t* gregs, uint64_t* fregs) 
     set_err("box64_call_regs: NULL sym/gregs/fregs");
     return 0;
   }
-  lock();
-  if (box64_ensure_emu() != 0) {
+  if (!emu) {
+    lock();
+    if (box64_ensure_emu() != 0) {
+      unlock();
+      return 0; /* box64_ensure_emu() already recorded the reason */
+    }
+    emu = thread_get_emu();
     unlock();
-    return 0; /* box64_ensure_emu() already recorded the reason */
   }
-  emu = thread_get_emu();
-  unlock();
 
   for (i = 0; i < 6; ++i) emu->regs[nn[i]].q[0] = gregs[i];
   for (i = 0; i < 8; ++i) memcpy(&emu->xmm[i], &fregs[i], sizeof(uint64_t));
 
-  /* emu and its stack are thread-local; guest execution runs unserialized. */
+  /* emu and its stack are thread-local; guest execution runs unserialized.
+   * Align the outgoing RSP (ABI entry parity, robust to a re-entrant caller)
+   * and restore the caller's RSP on a normal return. DynaCall selects the
+   * per-library signal policy from `sym` centrally (DynaCallCore). */
+  old_rsp = call_align(emu);
+  old_ip = R_RIP;
   DynaCall(emu, (uintptr_t)sym, 0);
+  call_unwind(emu, old_rsp, old_ip);
 
   ret = R_RAX;
   gregs[0] = R_RAX;
   gregs[1] = R_RDX;
   memcpy(&fregs[0], &emu->xmm[0], sizeof(uint64_t));
   memcpy(&fregs[1], &emu->xmm[1], sizeof(uint64_t));
-  /* The engine ran the call: clear the slot so a 0 return is unambiguously the
-   * guest's own RAX and not a refusal. (An error raised by a nested call
-   * during DynaCall belongs to that nested caller, which already read it.) */
   set_err(NULL);
   return ret;
 }
@@ -276,12 +537,13 @@ BOX64_API uint64_t box64_call_marshaled(void* sym, uint64_t* gregs,
   int i;
   uint64_t ret;
   uintptr_t oldip;
-  printf("[box64] box64_call_marshaled sym=%p stack_len=%zu.\n", sym,
-         stack_len);
   size_t al;
+  BOX64_DIAG("[box64] box64_call_marshaled sym=%p stack_len=%zu.\n", sym,
+             stack_len);
   /* Same 0-is-ambiguous contract as box64_call_regs(): refusals record the
    * error slot, a call that ran clears it. */
-  if (!box64_is_ready()) {
+  emu = thread_peek_emu();
+  if (!my_context || (!emu && !box64_is_ready())) {
     set_err("box64_call_marshaled: not initialized");
     return 0;
   }
@@ -289,16 +551,28 @@ BOX64_API uint64_t box64_call_marshaled(void* sym, uint64_t* gregs,
     set_err("box64_call_marshaled: NULL sym/gregs/fregs");
     return 0;
   }
-  lock();
-  if (box64_ensure_emu() != 0) {
+  if (!emu) {
+    lock();
+    if (box64_ensure_emu() != 0) {
+      unlock();
+      return 0; /* box64_ensure_emu() already recorded the reason */
+    }
+    emu = thread_get_emu();
     unlock();
-    return 0; /* box64_ensure_emu() already recorded the reason */
   }
-  emu = thread_get_emu();
-  unlock();
 
   Push64(emu, R_RBP);
   R_RBP = R_RSP;
+  /* Entry-alignment fix. The engine's own entry path (entrypoint.c) does
+   * `Push64(RBP); RBP=RSP; RSP &= ~0xF; PushExit();` and PushExit subtracts 8,
+   * so the guest must be entered with (pre-PushExit RSP) % 16 == 0 to get the
+   * ABI parity rsp % 16 == 8. The old code skipped the mask and only happened
+   * to work when the caller's RSP was already 8 mod 16; it was 8 bytes off for
+   * a 16-aligned emu RSP (measured with a naked-asm probe), and it also left
+   * the outgoing blob 8-mod-16 aligned. Masking down here makes the parity
+   * independent of the caller and puts the blob on a 16-byte boundary, which
+   * is what an aligned SSE access to a stack aggregate requires. */
+  R_RSP &= ~(uint64_t)0xF;
   al = (stack_len + 15u) & ~15u;
   if (al) {
     R_RSP -= al;
@@ -311,8 +585,13 @@ BOX64_API uint64_t box64_call_marshaled(void* sym, uint64_t* gregs,
   for (i = 0; i < 6; ++i) emu->regs[nn[i]].q[0] = gregs[i];
   for (i = 0; i < 8; ++i) memcpy(&emu->xmm[i], &fregs[i], sizeof(uint64_t));
 
+  /* DynaCall selects the per-library signal policy from `sym` centrally. */
   oldip = R_RIP;
   DynaCall(emu, (uintptr_t)sym, 0);
+  /* Normal return: undo the RBP anchor and the outgoing blob so the caller's
+   * RSP and RBP are exactly what they were. On a guest longjmp DynaCall
+   * deliberately leaves the abandoned RSP in place, so the frame is not
+   * unwound — restoring here would clobber the longjmp target's stack. */
   if (oldip == R_RIP) {
     R_RSP = R_RBP;
     R_RBP = Pop64(emu);
@@ -323,7 +602,139 @@ BOX64_API uint64_t box64_call_marshaled(void* sym, uint64_t* gregs,
   gregs[1] = R_RDX;
   memcpy(&fregs[0], &emu->xmm[0], sizeof(uint64_t));
   memcpy(&fregs[1], &emu->xmm[1], sizeof(uint64_t));
-  /* Ran: clear so a 0 return cannot be mistaken for an engine refusal. */
+  set_err(NULL);
+  return ret;
+}
+
+/* Fixed-arity integer/pointer entries. Script-generated (real C parameter
+ * lists, one direct store per used argument register; no fmt re-parse and no
+ * FPR/stack traffic). Regenerate with `python3 tools/gen_call_arity.py`; the
+ * generated file is checked in. */
+#include "libbox64_call_arity.inc"
+
+/*
+ * Compiled-layout entry (see include/libbox64.h). The layout is a static
+ * const produced by the stub generator; this code only applies the masks and
+ * the byte count, it never parses or classifies a signature. Compared with
+ * box64_call_regs()/box64_call_marshaled() it copies exactly the argument
+ * registers the layout names, never touches an unnamed SSE register, and skips
+ * the outgoing frame entirely when stack_len is 0.
+ *
+ * Like the fixed-arity entries it enters through DynaCall_abi(), the known-ABI
+ * variant of DynaCall(): `sym` must be a compiled function of the convention
+ * the plan encodes. The seam can express a Win64 register placement, but no
+ * Win64 adapter uses this entry today; the Wine path writes the register file
+ * through box64_call_regs()/box64_call_marshaled(), which keep the generic
+ * DynaCall() behavior unchanged. In-tree callers (unilib) use the SysV64
+ * placement.
+ */
+BOX64_API uint64_t box64_call_plan(void* sym, const box64_sigplan_t* plan,
+                                   const uint64_t* gprs,
+                                   const box64_fpr_t* fprs, const void* stack,
+                                   box64_call_results_t* out) {
+  x64emu_t* emu;
+  uint32_t m;
+  int i;
+  uintptr_t oldip;
+  size_t al;
+  uint64_t old_rsp = 0;
+  uint64_t ret;
+  static const int gpr_pos[6] = {_DI, _SI, _DX, _CX, _R8, _R9};
+
+  BOX64_DIAG("[box64] box64_call_plan sym=%p gpr=%#x fpr=%#x stack=%u.\n", sym,
+             plan ? plan->gpr_mask : 0, plan ? plan->fpr_mask : 0,
+             plan ? plan->stack_len : 0);
+  if (!plan) {
+    set_err("box64_call_plan: NULL plan");
+    return 0;
+  }
+  /* The masks only have meaning over the engine register file; a bit outside
+   * it is a generator bug, refused rather than silently ignored. */
+  if (plan->gpr_mask & ~0x3Fu) {
+    set_err("box64_call_plan: gpr_mask names a position outside 0..5");
+    return 0;
+  }
+  if (plan->fpr_mask & ~0xFFu) {
+    set_err("box64_call_plan: fpr_mask names a position outside 0..7");
+    return 0;
+  }
+  if (plan->ret_mask & ~0x0Fu) {
+    set_err("box64_call_plan: ret_mask names a position outside 0..3");
+    return 0;
+  }
+  if ((plan->gpr_mask && !gprs) || (plan->fpr_mask && !fprs) ||
+      (plan->stack_len && !stack)) {
+    set_err("box64_call_plan: mask names a NULL value array");
+    return 0;
+  }
+
+  emu = call_entry("box64_call_plan", sym);
+  if (!emu) return 0;
+
+  /* Argument register file: only the positions the layout names, in position
+   * order. Unnamed positions keep whatever the emu had (ordinary caller-saved
+   * semantics for the callee). */
+  for (m = plan->gpr_mask, i = 0; m; m >>= 1, ++i)
+    if (m & 1u) emu->regs[gpr_pos[i]].q[0] = gprs[i];
+  for (m = plan->fpr_mask, i = 0; m; m >>= 1, ++i)
+    if (m & 1u) memcpy(&emu->xmm[i], &fprs[i], sizeof(box64_fpr_t));
+
+  /* SysV64 varargs contract on entry: AL = number of vector registers used.
+   * For a sparse mask the true count is ambiguous, so use the safe upper bound
+   * highest-used + 1 (equal to the count for the contiguous masks a real
+   * signature produces, and enough for a callee's register save area when a
+   * plan does have holes). A non-varargs callee ignores it, and the return
+   * overwrites RAX. __builtin_clz is guarded because it is undefined at 0. */
+  R_RAX = plan->fpr_mask
+              ? (uint64_t)(32 - __builtin_clz((unsigned)plan->fpr_mask))
+              : 0;
+
+  /* Outgoing stack blob, exactly the box64_call_marshaled() shape and only
+   * when there is one: any byte count is rounded up to 16, the tail is
+   * zeroed, and RBP is pushed only to anchor the restore. stack_len is a
+   * uint16_t, so (stack_len + 15) fits size_t with room to spare and the
+   * rounded value never overflows (at most 65536). */
+  al = plan->stack_len ? (((size_t)plan->stack_len + 15u) & ~(size_t)15u) : 0;
+  if (al) {
+    Push64(emu, R_RBP);
+    R_RBP = R_RSP;
+    /* Same entry-alignment fix as box64_call_marshaled (and the engine's own
+     * entrypoint.c): mask the frame anchor down to 16 so PushExit(-8) leaves
+     * the ABI entry parity and the stack blob starts 16-byte aligned. */
+    R_RSP &= ~(uint64_t)0xF;
+    R_RSP -= al;
+    memcpy((void*)(uintptr_t)R_RSP, stack, plan->stack_len);
+    if (al > plan->stack_len)
+      memset((void*)(uintptr_t)(R_RSP + plan->stack_len), 0,
+             al - plan->stack_len);
+  } else {
+    /* No outgoing frame: still align RSP for the ABI entry parity, and because
+     * a re-entrant call from a bridge callback starts on the outer guest
+     * frame's RSP. */
+    old_rsp = call_align(emu);
+  }
+
+  oldip = R_RIP;
+  DynaCall_abi(emu, (uintptr_t)sym, 0);
+  /* Same unwind rule as box64_call_marshaled: on a normal return restore the
+   * caller's RSP/RBP exactly; on a guest longjmp leave the RSP DynaCall_abi
+   * left (it keeps DynaCall()'s longjmp rule verbatim). */
+  if (al) {
+    if (oldip == R_RIP) {
+      R_RSP = R_RBP;
+      R_RBP = Pop64(emu);
+    }
+  } else {
+    call_unwind(emu, old_rsp, oldip);
+  }
+
+  ret = R_RAX;
+  if (out) {
+    if (plan->ret_mask & 0x1u) out->rax = R_RAX;
+    if (plan->ret_mask & 0x2u) out->rdx = R_RDX;
+    if (plan->ret_mask & 0x4u) memcpy(&out->xmm0, &emu->xmm[0], sizeof(box64_fpr_t));
+    if (plan->ret_mask & 0x8u) memcpy(&out->xmm1, &emu->xmm[1], sizeof(box64_fpr_t));
+  }
   set_err(NULL);
   return ret;
 }
@@ -344,7 +755,7 @@ static void bridge_host6(x64emu_t* emu, uintptr_t fnc) {
  */
 BOX64_API void box64_bridge_args(void* emuv, uint64_t* gregs, uint64_t* fregs) {
   x64emu_t* emu = (x64emu_t*)emuv;
-  printf("[box64] box64_bridge_args emu=%p.\n", emuv);
+  BOX64_DIAG("[box64] box64_bridge_args emu=%p.\n", emuv);
   int nn[] = {_DI, _SI, _DX, _CX, _R8, _R9};
   int i;
   if (!emu || !gregs || !fregs) return;
@@ -355,8 +766,8 @@ BOX64_API void box64_bridge_args(void* emuv, uint64_t* gregs, uint64_t* fregs) {
 BOX64_API void box64_bridge_ret(void* emuv, uint64_t rax, uint64_t rdx,
                                 const uint64_t* fregs2) {
   x64emu_t* emu = (x64emu_t*)emuv;
-  printf("[box64] box64_bridge_ret rax=0x%llx.\n",
-         (unsigned long long)rax);
+  BOX64_DIAG("[box64] box64_bridge_ret rax=0x%llx.\n",
+             (unsigned long long)rax);
   if (!emu) return;
   R_RAX = rax;
   R_RDX = rdx;
@@ -380,7 +791,7 @@ BOX64_API void* box64_callback(void* host_fn, const char* fmt) {
  */
 BOX64_API void* box64_callback_with(void* host_fn, void* bridge_fn) {
   uintptr_t br;
-  printf("[box64] box64_callback_with host_fn=%p.\n", host_fn);
+  BOX64_DIAG("[box64] box64_callback_with host_fn=%p.\n", host_fn);
   if (!box64_is_ready() && box64_lib_init() != 0) return NULL;
   if (!host_fn || !bridge_fn) return NULL;
   lock();

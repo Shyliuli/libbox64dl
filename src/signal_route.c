@@ -19,6 +19,13 @@
  * so the emu layout is the real one. Return 1 = handled here, box64 must
  * not touch it further; return 0 = a guest-context fault, box64 proceeds
  * with its own dispatch as before.
+ *
+ * KNOWN GAP (not fixed here): the guest marker is Wine's TEB (GS base != 0). A
+ * plain Linux-x64 guest keeps TLS in FS and leaves GS 0, so its
+ * dynarec-protected pages (protectDB/auto-SMC) are currently misrouted to the
+ * host action. A fix needs a lock-free, async-signal-safe fault-PC
+ * discriminator (the rbtree lookup is not, because nodes can be freed
+ * concurrently); none is adopted in this change.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -30,6 +37,7 @@
 #include <ucontext.h>
 
 #include "emu/x64emu_private.h"
+#include "libbox64_signal.h"
 #include "regs.h"
 #include "x64emu.h"
 
@@ -57,14 +65,25 @@ static struct sigaction* pre_box64(int sig) {
 
 int box64dl_signal_route(x64emu_t* emu, int sig, siginfo_t* info, void* ucntx) {
   struct sigaction* pre;
+  void* pc = ucntx ? (void*)ROUTE_PC((ucontext_t*)ucntx) : NULL;
 
-  if (getenv("BOX64DL_ROUTE_TRACE"))
-    fprintf(stderr, "[route] sig=%d emu=%p gs=%#lx tid=%ld\n", sig, (void*)emu,
-            emu ? (unsigned long)emu->segs_offs[_GS] : 0ul,
+  /* Resolved once at init from BOX64DL_ROUTE_TRACE (signal_policy.c): a fault
+   * can arrive on any thread at any time, so the signal path must not call
+   * getenv. 0 until publication, which happens before init_signal_helper()
+   * installs the handler that can reach this code. */
+  if (box64dl_route_trace)
+    fprintf(stderr, "[route] sig=%d emu=%p gs=%#lx pc=%p tid=%ld\n", sig,
+            (void*)emu, emu ? (unsigned long)emu->segs_offs[_GS] : 0ul, pc,
             (long)syscall(SYS_gettid));
 
-  /* A thread with a wine TEB (GS base set) is inside the guest world: the
-   * guest's own handler — wine's SEH — is the correct route, as before. */
+  /*
+   * A thread with a wine TEB (GS base set) is inside the guest world: the
+   * guest's own handler — wine's SEH — is the correct route, as before. A
+   * plain Linux-x64 guest thread leaves GS 0 (its TLS is in FS), so its JIT
+   * faults are currently treated as host faults; that gap is documented, not
+   * papered over. The check here stays lookup-free on purpose: no rbtree access
+   * from the signal path.
+   */
   if (emu && emu->segs_offs[_GS] != 0) return 0;
 
   pre = pre_box64(sig);
@@ -75,7 +94,6 @@ int box64dl_signal_route(x64emu_t* emu, int sig, siginfo_t* info, void* ucntx) {
    * embedded processes). */
   {
     Dl_info di;
-    void* pc = (void*)ROUTE_PC((ucontext_t*)ucntx);
     const char* mod = (dladdr(pc, &di) && di.dli_fname) ? di.dli_fname : "?";
     fprintf(stderr,
             "[libbox64dl] host fault on thread %ld: sig=%d pc=%p (%s +%#lx) "

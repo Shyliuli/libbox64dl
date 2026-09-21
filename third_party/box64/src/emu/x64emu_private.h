@@ -150,6 +150,13 @@ typedef struct x64emu_s {
     void*       res_state_32;  //32bits version of res_state
     void*       res_state_64;
     #endif
+    /* libbox64dl patch 0005: signal-mask policy scope.
+     * requested_call_policy is BOX64DL_POLICY_COMPAT/FAST when a host entry
+     * selected the target library's policy, or -1 (INHERIT) to resolve from the
+     * entry PC. active_jmpbuf_policy is the policy of the frame emu->jmpbuf
+     * currently points at; the signal handler restores the mask under it. */
+    int         requested_call_policy;
+    int         active_jmpbuf_policy;
 } x64emu_t;
 
 #define EMUTYPE_NONE    0

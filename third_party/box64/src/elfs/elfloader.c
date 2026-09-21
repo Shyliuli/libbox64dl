@@ -38,6 +38,9 @@
 #include "dictionnary.h"
 #include "symbols.h"
 #include "cleanup.h"
+/* libbox64dl patch 0005: environment library rules (BOX64DL_SIGNAL_LIBRARY_RULES)
+ * bound to a library before its constructors run; see RunElfInit below. */
+#include "libbox64_signal.h"
 #include "globalsymbols.h"
 #include "elfhacks.h"
 #ifdef DYNAREC
@@ -452,6 +455,14 @@ int AllocLoadElfMemory(box64context_t* context, elfheader_t* head, int mainbin)
 
 void FreeElfMemory(elfheader_t* head)
 {
+    /* libbox64dl patch 0005: the image is about to be unmapped, so drop its
+     * signal-policy range HERE -- the single point every unload path reaches,
+     * dependencies included (a guest dlclose of a parent that pulls a child, a
+     * host box64_dlclose, context teardown). Clearing before the mapping goes
+     * also prevents an address reuse from inheriting the old policy. The
+     * library's destructors have already run by now, under the policy that was
+     * in force, so this does not clear early. */
+    box64dl_signal_lib_range_clear((uintptr_t)GetBaseAddress(head));
     if(head->multiblock_n) {
 #ifdef DYNAREC
         for(int i=0; i<head->multiblock_n; ++i) {
@@ -1223,6 +1234,32 @@ void RunElfInit(elfheader_t* h, x64emu_t *emu)
 {
     if(!h || h->init_done)
         return;
+    /* libbox64dl patch 0005: bind this image's signal policy from
+     * BOX64DL_SIGNAL_LIBRARY_RULES before any constructor guest call runs, so
+     * an environment rule covers constructors (their dependencies register in
+     * the recursive RunElfInit calls below). The range is a plain
+     * (lo,hi,policy) value; a library with no matching rule registers nothing
+     * and keeps the no-override fast path. An explicit
+     * box64_signal_policy_set_library() applies to later calls; by then these
+     * constructors have already run under the environment/default policy. */
+    {
+        uintptr_t lo = (uintptr_t)GetBaseAddress(h);
+        uint32_t sz = GetBaseSize(h);
+        const char* path = (ElfPath(h) && *ElfPath(h)) ? ElfPath(h) : ElfName(h);
+        int pol = box64dl_signal_lib_rule_lookup(path);
+        if(lo && sz && pol >= 0 && box64dl_signal_lib_range_set(lo, lo + sz, pol) != 0) {
+            /* A configured policy must never silently degrade to the global
+             * default. The table is bounded; at the bound, refuse the load
+             * outright rather than run its constructors under the wrong policy.
+             * This is a cold config path (guest execution is serialized with
+             * it), so failing hard is the honest outcome. */
+            fprintf(stderr,
+                    "[libbox64dl] signal policy for %s NOT applied (override "
+                    "table full); refusing to run it under the wrong policy\n",
+                    path ? path : "(unknown)");
+            abort();
+        }
+    }
     // adjust elf Dynamic section header with the delta of the load address if needed
     // but do not adjust if there is no libs loaded as it will use it's own loader to do similar stuffs
     if(!box64_nolibs) PatchLoadedDynamicSection(h);

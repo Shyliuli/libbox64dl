@@ -9,5 +9,7 @@ void EmuCall(x64emu_t* emu, uintptr_t addr);
 void StopEmu(x64emu_t* emu, const char* reason, int is32bits);
 void DynaRun(x64emu_t *emu);
 void DynaCall(x64emu_t* emu, uintptr_t addr, int no_alt);
+/* libbox64dl patch 0004: known-ABI variant (see dynarec.c DynaCallCore). */
+void DynaCall_abi(x64emu_t* emu, uintptr_t addr, int no_alt);
 
 #endif // __BOX64CPU_H_

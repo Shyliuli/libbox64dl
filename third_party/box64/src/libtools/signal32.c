@@ -485,6 +485,13 @@ int unlockMutex();
 int write_opcode(uintptr_t rip, uintptr_t native_ip, int is32bits);
 #define is_memprot_locked (1<<1)
 #define is_dyndump_locked (1<<8)
+
+/* libbox64dl patch 0005: BOX32 sibling of the signals.c resume sites. BOX32 is
+ * off in the embedded build, but the same siglongjmp(emu->jmpbuf) resume must
+ * restore the mask under the frame's own policy (COMPAT: no-op, siglongjmp
+ * restores it; FAST: restore the delivered ucontext mask). */
+extern void box64dl_signal_mask_restore(int active_policy, const void* ucntx);
+
 int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db)
 {
     int Locks = unlockMutex();
@@ -771,6 +778,8 @@ int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, sigin
             #ifdef DYNAREC
             dynablock_leave_runtime((dynablock_t*)cur_db);
             #endif
+            /* patch 0005: restore the mask under this frame's own policy. */
+            box64dl_signal_mask_restore(emu->active_jmpbuf_policy, ucntx);
             #ifdef ANDROID
             siglongjmp(*emu->jmpbuf, skip);
             #else

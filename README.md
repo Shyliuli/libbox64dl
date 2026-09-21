@@ -20,8 +20,53 @@ box64_call_marshaled(f, gregs, fregs, stk, len);   /* 带栈参数 */
 void* cb = box64_callback(host_fn);                /* 宿主函数 → guest 可调地址 */
 ```
 
+引擎寄存器文件的 ABI 类型与容量常量集中在 `include/libbox64_abi.h`（`libbox64.h` 与
+`DynaCall_abi` seam 共用），`libbox64.h` 自身不依赖 unilib；unilib 的
+`unilib_sigplan` / `unilib_fpr` / `unilib_results` 直接别名到这些类型。
+
 调用是每线程一个 emu、各带独立 guest 栈，`DynaCall` 不加全局锁；全局锁只保护
 `dlopen` / `dlsym` / bridge 注册这些改动共享结构的操作。
+
+## 定参入口与编译期计划
+
+上面两个入口每次都完整摆一遍寄存器文件。参数全是指针和整数、而且个数固定时，用下面
+这组更省的入口：
+
+```c
+box64_call0(f);                  /* 只按用到的参数寄存器摆 */
+box64_call1(f, a0);
+/* … 直到 */ box64_call6(f, a0, a1, a2, a3, a4, a5);
+```
+
+`box64_call0` 到 `box64_call6` 按 SysV64 的参数寄存器顺序对应位置 0 到 5，返回 guest
+的 RAX，只写回 RAX，不写回 RDX 与 XMM。没有浮点和栈参数时它们不写 SSE 组、也不建出栈
+数据块，因此比 `box64_call_regs` 少了无用的寄存器拷贝，比 `box64_call_marshaled` 少了
+空栈块。线程 emu、重入、被调用者保存寄存器与栈指针的处理都由引擎承担，与旧入口一致。
+
+带浮点、嵌套结构体、大结构体按值或 sret 的完整签名走**编译期计划**。生成期就知道一份
+签名用哪些参数寄存器和多少栈字节，于是每个签名发一份静态常量：
+
+```c
+static const box64_sigplan_t plan = BOX64_SIGPLAN(gpr_mask, fpr_mask,
+                                                  ret_mask, stack_len);
+box64_call_results_t out;
+box64_call_plan(f, &plan, gprs, fprs, stack, &out);
+```
+
+计划里的四个掩码分别点名参数 GPR 位置、参数 SSE 位置、要写回的返回位置（RAX、RDX、
+XMM0、XMM1）和出栈字节数。**引擎不在运行时解析或归类签名**，它只按掩码读、按掩码写，
+并按下 `stack_len` 拷出栈数据块。`box64_fpr_t` 带一份 SSE 寄存器的完整 16 字节，因为
+一个结构体怎么分到寄存器由 psABI 决定，生成器把结果写进计划，`tests/test_call_plan.c`
+拿 x86_64 编译器当对照。`stack_len` 是 `uint16_t`，生成期必须保证不超过上限。
+
+诊断开关默认**关闭**。`BOX64DL_DIAG` 只在第一次使用时采样一次，`box64_diag_set()` 可以
+在运行期覆盖它；错误从不走这个开关，始终经 `box64_dlerror()` 报告。相关回归：
+
+```bash
+make -C libbox64dl test-call-arity   # 定参入口 + 重入回调
+make -C libbox64dl test-call-plan    # 编译期计划与结构体摆放
+make -C libbox64dl test-call-fini    # box64_lib_fini() 之后的调用被拒绝
+```
 
 ## 从 guest 状态回到 host（Wine detach 安全）
 
@@ -140,15 +185,17 @@ make plugins  # 列出已注册插件
 
 ## 打包版 box64 CLI
 
-`make cli` 产出 `build/bin/box64`：一个 LoongArch 可执行文件，`cli/box64_main.c`
-就是上游 `main.c` 那两句 `initialize()` + `emulate()`，链接到本项目的静态引擎
-（whole-archive `libbox64.a` + `libdynarec.a` + Rust facade，与 unilib 测试相同的
-链接形状）。它是应用打包布局里的 `runtime/bin/box64`：
+`make cli` 产出 `build/bin/box64`：一个 thin front（`cli/box64_main.c` 就是上游 `main.c`
+的 `initialize()` + `emulate()`），它**动态链接**打包树里的 `build/lib/libbox64dl.so`
+（`-lbox64dl`，rpath `$ORIGIN/../lib`），不是在可执行文件里再静态链一份引擎。因此 CLI
+与嵌入式消费者用的是**同一个 engine、同一套库级信号策略**。它是应用打包布局里的
+`runtime/bin/box64`：
 
 - winedl 用它当 `system_box64`：prefix 引导的 wineboot 子进程、以及嵌入式引擎
   的 `box64path`（wineserver / CreateProcess 子进程 re-exec 的落点）都指向它；
-- 行为与系统 box64 完全一致（嵌入用的三张补丁对独立运行路径都是 no-op：
-  0003 的 host-fault 路由在没有外来宿主线程时永不触发，0002 只改默认日志级别）。
+- 嵌入相关的补丁在独立运行路径上都是 no-op（0002 只改默认日志级别；0003 的
+  host-fault 路由在没有外来宿主线程时永不触发），但这**不等于**与系统 box64 行为
+  完全一致——CLI 跑的是本库的引擎与库级信号策略（默认 `fast`）。
 
 wine 的 x86_64-unix `ntdll.so` 需要 libgcc 的 `_Unwind_Find_FDE`（它的
 DWARF↔SEH 桥）；系统 box64 走模拟版 `/usr/lib/box64-x86_64-linux-gnu/libgcc_s.so.1`
@@ -175,6 +222,53 @@ $(LIBBOX64DL)/plugins/libnode:
 
 `make graft` 会把插件软链进 vendored 树，并生成 `library_list_extra.h` 与
 `box64dl_plugins.cmake`。
+
+## 信号掩码策略（库级）
+
+策略默认 `fast`，分**全局默认**和**每库覆盖**两级，优先级是
+**显式 per-library > 环境库规则 > 全局默认**：
+
+| 层级 | 配置 |
+| --- | --- |
+| 全局默认 | `BOX64DL_SIGNAL_POLICY=fast|compat`（默认 `fast`）；`box64_signal_policy_set()` / `box64_signal_policy_get()` |
+| 每库覆盖 | `BOX64DL_SIGNAL_LIBRARY_RULES='libfoo.so=compat;/opt/bar/libbaz.so=fast'`：`;` 分隔的 `MATCH=policy`，MATCH 含 `/` 比完整路径/realpath、否则比最后一段，**精确匹配、无子串/前缀/glob、首条命中生效**；规则在任何库构造函数之前绑定，格式错误让 `box64_lib_init()` 直接失败 |
+| 显式 API | `box64_signal_policy_set_library(void* handle, int policy)` / `box64_signal_policy_get_library(void* handle)` |
+
+配置是**冷操作、必须顺序执行**：没有热路径锁，改动经 epoch 失效每线程 O(1) 策略缓存，
+调用方不得让策略改动与其它线程上的 guest call、或 `dlopen`/`dlclose` 并发（与
+`box64_lib_fini()` 同一份 sequential-config 契约）。`handle` 只能对已 `dlopen` 的库设置，
+其构造函数已按环境规则/全局默认跑过，所以显式覆盖只作用于之后的新宿主 entry；
+`get_library` 返回 override/规则/全局默认里的有效值。
+
+作用域是**宿主入口**：一次宿主进入的策略覆盖该次调用链（含其直接依赖），guest 内部
+自己发起的调用不切换策略——不保证覆盖所有 guest PC。宿主重入时，只有策略不同的嵌套
+才强制建立新 frame，同策略可以共享一个 frame。
+
+`fast` 省掉每次 `EmuRun()` 的 `rt_sigprocmask`（`sigsetjmp(buf, 0)`），改由信号路径按
+**被投递信号的 ucontext 掩码**恢复；`compat` 则在**建立恢复点**时保存当时的入口掩码，
+信号 `siglongjmp` 回恢复点时用这份保存值恢复。二者的差异来自 call 中途**任何来源**改过
+掩码——guest、host 或引擎自身都算，不只是 guest 的最后一次 `sigprocmask`：`fast` 用
+最近一次实际掩码，`compat` 回到恢复点保存的入口掩码。需要严格“恢复点入口掩码”语义的
+库用 `compat`，例如：
+
+```sh
+BOX64DL_SIGNAL_POLICY=fast \
+BOX64DL_SIGNAL_LIBRARY_RULES='libspecial.so=compat' \
+  ./your-app
+```
+
+## fault 路由（src/signal_route.c）
+
+与掩码策略分开的一件事：先决定 fault 归不归 box64。当前实现只有一条判定：
+
+- Wine guest 线程（GS base≠0，TEB）→ guest。
+- 其余 → 转发给 init 前的 host action（V8 等）；没有 host action 就带诊断按默认
+  处置退出。
+
+这条路径不查表、不读取环境变量，也不依赖任何未应用的外部 patch。
+
+回归：`make test-signal-route`（真信号：host raise 归 host、bridge 回调 host fault
+仍归 host）。
 
 ## 对 vendored box64 的改动面
 

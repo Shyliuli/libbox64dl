@@ -346,10 +346,23 @@ void FreeBox64Context(box64context_t** context)
         ctx->atfork_sz = ctx->atfork_cap = 0;
     }
 
-    for(int i=0; i<MAX_SIGNAL; ++i)
+    for(int i=0; i<MAX_SIGNAL; ++i) {
+        /* libbox64dl patch 0006: the four signals box64 installs itself
+         * (SIGSEGV/SIGBUS/SIGILL/SIGABRT) are the property of
+         * init_signal_helper/fini_signal_helper. Resetting them to SIG_DFL here
+         * runs BEFORE finiAllHelpers -> fini_signal_helper, whose ownership
+         * check would then see SIG_DFL instead of box64's handler and skip the
+         * restore, permanently eating the host action box64 replaced at init
+         * (e.g. a guest-registered fatal handler is stored in ctx->signals[]
+         * and would trigger exactly that). Let fini_signal_helper be the single
+         * owner: it restores the saved pre-box64 action for any signal still
+         * owned by box64 and leaves a later host action alone. */
+        if(i==SIGSEGV || i==SIGBUS || i==SIGILL || i==SIGABRT)
+            continue;
         if(ctx->signals[i]!=0 && ctx->signals[i]!=1) {
             signal(i, SIG_DFL);
         }
+    }
 
     *context = NULL;                // bye bye my_context
 

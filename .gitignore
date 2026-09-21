@@ -16,6 +16,13 @@ third_party/box64/src/wrapped/wrappedlibgccs.c
 third_party/box64/src/wrapped/wrappedlibgccs_private.h
 third_party/box64/src/wrapped/wrappedlibnode.c
 third_party/box64/src/wrapped/wrappedlibnode_private.h
+third_party/box64/src/wrapped/wrappedlibnode_bridge_private.h
+third_party/box64/src/signal_policy.c
+third_party/box64/src/diag.c
+third_party/box64/src/libbox64_call_arity.inc
+third_party/box64/src/include/libbox64_abi.h
+third_party/box64/src/include/libbox64_diag.h
+third_party/box64/src/include/libbox64_signal.h
 third_party/box64/src/library_list_extra.h
 third_party/box64/box64dl_core.cmake
 third_party/box64/box64dl_plugins.cmake
@@ -27,3 +34,9 @@ third_party/box64/.cache/
 
 # Downstream projects register plugins by symlinking their directory in
 plugins/libnode
+
+# Generated from tools/gen_call_arity.py by `make`
+src/libbox64_call_arity.inc
+
+__pycache__/
+*.pyc

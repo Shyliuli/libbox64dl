@@ -47,6 +47,15 @@
 
 #include "signal_private.h"
 
+/* libbox64dl patch 0005: every resume out of a handler must put the signal mask
+ * back under the policy of the frame it siglongjmps into. A COMPAT frame is a
+ * no-op here (siglongjmp restores the saved mask); a FAST frame restores the
+ * mask the kernel recorded in the delivered signal's ucontext. The policy is
+ * read from the emu's live frame, never from a global, so mixed nested scopes
+ * restore the right mask. Kept at the top of the file, away from the patch-0003
+ * hunks, so `make patch`'s reverse-dry-run checks stay clean. */
+extern void box64dl_signal_mask_restore(int active_policy, const void* ucntx);
+
 static void sigstack_destroy(void* p)
 {
     x64_stack_t *ss = (x64_stack_t*)p;
@@ -520,6 +529,8 @@ int my_sigactionhandler_oldcode_64(x64emu_t* emu, int32_t sig, int simple, sigin
             #ifdef DYNAREC
             dynablock_leave_runtime((dynablock_t*)cur_db);
             #endif
+            /* patch 0005: restore the mask under this frame's own policy. */
+            box64dl_signal_mask_restore(emu->active_jmpbuf_policy, ucntx);
             #ifdef ANDROID
             siglongjmp(*emu->jmpbuf, skip);
             #else
@@ -851,6 +862,8 @@ void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
                         #if defined(RV64) || defined(PPC64LE)
                         emu->xSPSave = emu->old_savedsp;
                         #endif
+                        /* patch 0005: restore the mask under this frame's own policy. */
+                        box64dl_signal_mask_restore(emu->active_jmpbuf_policy, ucntx);
                         #ifdef ANDROID
                         siglongjmp(*(JUMPBUFF*)emu->jmpbuf, 3);
                         #else
@@ -925,6 +938,8 @@ void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
                 #if defined(RV64) || defined(PPC64LE)
                 emu->xSPSave = emu->old_savedsp;
                 #endif
+                /* patch 0005: restore the mask under this frame's own policy. */
+                box64dl_signal_mask_restore(emu->active_jmpbuf_policy, ucntx);
                 #ifdef ANDROID
                 siglongjmp(*(JUMPBUFF*)emu->jmpbuf, 2);
                 #else
@@ -1723,10 +1738,26 @@ void init_signal_helper(box64context_t* context)
 
 void fini_signal_helper()
 {
-    signal(SIGSEGV, SIG_DFL);
-    signal(SIGBUS, SIG_DFL);
-    signal(SIGILL, SIG_DFL);
-    signal(SIGABRT, SIG_DFL);
+    /* libbox64dl patch 0006: resetting these four signals to SIG_DFL eats a
+     * host handler box64 replaced at init (V8's wasm trap handler among them).
+     * Restore the actions init_signal_helper saved instead, but only for a
+     * signal whose disposition is STILL box64's own handler: if the host
+     * re-installed something after init, that newer action is left in place.
+     * This runs while box64's handler is still installed (nothing has replaced
+     * it yet in this teardown path), so the guard is a real ownership test, not
+     * an assumed SIG_DFL. */
+    struct sigaction cur;
+    #define BOX64DL_RESTORE(SIG, PRE)                                          \
+        do {                                                                   \
+            if(sigaction(SIG, NULL, &cur)==0 &&                                \
+               cur.sa_sigaction == (void (*)(int, siginfo_t*, void*))my_box64signalhandler) \
+                sigaction(SIG, &(PRE), NULL);                                  \
+        } while(0)
+    BOX64DL_RESTORE(SIGSEGV, box64dl_pre_segv);
+    BOX64DL_RESTORE(SIGBUS, box64dl_pre_bus);
+    BOX64DL_RESTORE(SIGILL, box64dl_pre_ill);
+    BOX64DL_RESTORE(SIGABRT, box64dl_pre_abrt);
+    #undef BOX64DL_RESTORE
 }
 
 #ifdef NEED_SIG_CONV

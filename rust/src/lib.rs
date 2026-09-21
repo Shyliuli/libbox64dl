@@ -32,7 +32,9 @@ impl GlobalError {
         let _ = self.err.push_str(msg);
         self.fresh = true;
     }
-    /// 读即消费：连续第二次调用返回 None（对齐 POSIX dlerror 语义）
+    /// 读即消费：连续第二次调用返回 None（对齐 POSIX dlerror 语义）。
+    /// 返回 owned 副本，供需要持有文本的 Rust 调用方（c_box64.rs 的
+    /// new_x64emu）；FFI 出口走 take_ptr，不克隆。
     pub fn get_err(&mut self) -> Option<CString> {
         if !self.fresh {
             return None;
@@ -40,11 +42,28 @@ impl GlobalError {
         self.fresh = false;
         Some(self.err.clone())
     }
+    /// 读即消费，但不克隆：直接把槽位本体的指针交出去（FFI 出口用）。
+    /// 返回空指针表示无错或已被消费。非空指针合法到本线程下一次**改动槽位**
+    /// 的错误操作（set 可能触发扩容搬移）；槽位已消费后的 no-op clear 不碰
+    /// 缓冲区，因此不缩短该指针的生命期。
+    pub fn take_ptr(&mut self) -> *const libc::c_char {
+        if !self.fresh {
+            return std::ptr::null();
+        }
+        self.fresh = false;
+        self.as_ptr()
+    }
+    /// 清空错误。槽位本已干净（!fresh）时直接返回：no-op clear 不触碰缓冲区，
+    /// 已交出的指针（take_ptr/as_ptr）保持地址与内容不变。fresh 时行为不变：
+    /// 置 fresh=false 并清空内容。
     pub fn clear_err(&mut self) {
+        if !self.fresh {
+            return;
+        }
         self.fresh = false;
         self.err.clear();
     }
-    /// 供 FFI 出口：直接给线程局部槽位的指针，避免克隆后悬空
+    /// 槽位本体指针：不消费、不克隆。仅供 take_ptr 取址使用。
     pub fn as_ptr(&self) -> *const libc::c_char {
         self.err.as_ptr()
     }
@@ -141,14 +160,14 @@ impl Global {
             init_dynarec_host_check();
         }
 
-        //TODO: 在实现嵌入式singal处理，正确处理signal并转发给host/guest
-        //Box64Context::new() 内部会调用 init_signal_helper()
-        //这会导致host的handler直接挂掉
-        //当前状态下的缺陷有：
-        // 1.host缺页:收不到，被box64处理，可能错误处理，总之host会挂
-        // 2.guest缺页:正确处理
-        // 3.box64fault:正确处理
-        //所以需要在init_signal_helper()中，保存host的handler并做合适的转发
+        //信号策略：在任何 guest call 之前一次性发布并冻结（默认 COMPAT，完全兼容）。
+        //`none` 在此被拒绝；此时尚未创建 context、也未安装任何 box64 handler。
+        //发布后热路径只读一个 int，不再取锁/getenv（见 include/libbox64_signal.h）。
+        signal_policy_publish()?;
+
+        //host handler 的接管与转发已由 patch 0003（init_signal_helper 保存
+        //box64dl_pre_*，my_box64signalhandler 经 box64dl_signal_route 转发给
+        //host 自己的 action）覆盖；box64_lib_fini() 再把它们还原回去。
 
         //新建模拟器上下文
         let context = Box64Context::new()?;
@@ -275,12 +294,79 @@ pub unsafe extern "C" fn box64_ctx_mutex() -> *mut libc::pthread_mutex_t {
 }
 
 /// 线程局部错误槽出口，供 C 的 box64_dlerror：读到即消费；
-/// 无错或已被消费返回 NULL。指针指向槽位本体，合法到本线程下一次错误操作
-/// （set/clear 可能触发扩容搬移），即 glibc 式"活到下一次调用"契约。
+/// 无错或已被消费返回 NULL。指针指向槽位本体（take_ptr 不克隆），合法到本线程
+/// 下一次改动槽位的错误操作；消费后的 no-op clear 不使其失效。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn box64_get_error() -> *const libc::c_char {
-    ERR.with_borrow_mut(|e| match e.get_err() {
-        Some(_) => e.as_ptr(),
-        None => std::ptr::null(),
-    })
+    ERR.with_borrow_mut(|e| e.take_ptr())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    /// 把取出的槽位指针读成 owned 文本。调用方保证指针有效（测试全程持有槽位，
+    /// 且在读之前没有改动槽位的操作）。
+    fn read(p: *const libc::c_char) -> String {
+        assert!(!p.is_null());
+        // SAFETY: p 来自 take_ptr/box64_get_error，指向本线程槽位缓冲区；
+        // 测试在本次读取前未执行 set/clear。
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn fresh_consume_roundtrip_get_err() {
+        let mut e = GlobalError::new();
+        assert!(e.get_err().is_none(), "干净槽位不返回错误");
+        e.set_err("first");
+        assert!(e.fresh, "set_err 置 fresh");
+        assert_eq!(e.get_err().unwrap().to_string(), "first");
+        assert!(!e.fresh, "读即消费：fresh 被清掉");
+        assert!(e.get_err().is_none(), "第二次读返回 None");
+    }
+
+    #[test]
+    fn fresh_consume_roundtrip_take_ptr() {
+        let mut e = GlobalError::new();
+        assert!(e.take_ptr().is_null(), "干净槽位给空指针");
+        e.set_err("boom");
+        let p = e.take_ptr();
+        assert!(!p.is_null());
+        assert_eq!(read(p), "boom");
+        assert!(e.take_ptr().is_null(), "第二次 take_ptr 为 NULL");
+    }
+
+    #[test]
+    fn clear_then_set_roundtrip() {
+        let mut e = GlobalError::new();
+        e.set_err("old");
+        e.clear_err();
+        assert!(!e.fresh);
+        assert!(e.get_err().is_none(), "clear 后无可读错误");
+        assert!(e.take_ptr().is_null(), "clear 后指针出口为空");
+        e.set_err("new");
+        assert_eq!(e.get_err().unwrap().to_string(), "new", "clear 后可重新 set");
+    }
+
+    #[test]
+    fn no_op_clear_keeps_handed_out_pointer() {
+        let mut e = GlobalError::new();
+        e.set_err("keep");
+        let p = e.take_ptr(); // 消费并交出槽位本体指针
+        assert_eq!(e.err.as_ptr(), p, "take_ptr 交出槽位本体，不是克隆");
+        e.clear_err(); // !fresh：no-op，不得触碰缓冲区
+        assert_eq!(read(p), "keep", "已交出指针在 no-op clear 后仍有效");
+        assert!(e.take_ptr().is_null(), "no-op clear 不复活错误");
+    }
+
+    #[test]
+    fn ffi_get_error_consumes_the_slot() {
+        Global::clear_err();
+        Global::set_err("ffi");
+        let p = unsafe { box64_get_error() };
+        assert_eq!(read(p), "ffi");
+        assert!(unsafe { box64_get_error() }.is_null(), "FFI 出口读即消费");
+        Global::clear_err();
+    }
 }

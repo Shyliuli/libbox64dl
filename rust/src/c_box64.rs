@@ -1,6 +1,6 @@
 use anyhow::Context;
 use libc::FILE;
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr};
 use std::ptr::NonNull;
 
 /// 对应 C 的 box64context_t
@@ -65,10 +65,30 @@ unsafe extern "C" {
     
     #[link_name = "new_x64emu"]
     pub unsafe fn c_new_x64emu(context: *mut c_box64_ctx) -> *mut c_x64emu_t;
+
+    // src/signal_policy.c — 一次性发布信号策略（见 include/libbox64_signal.h，
+    // patches/0005）。必须在任何 guest call 之前调用；`none` 在这里被拒绝。
+    #[link_name = "box64dl_signal_policy_publish"]
+    pub unsafe fn c_signal_policy_publish() -> i32;
+    #[link_name = "box64dl_signal_policy_refusal"]
+    pub unsafe fn c_signal_policy_refusal() -> *const libc::c_char;
 }
 
 pub fn init_box64_trace() {
     unsafe { c_init_box64_trace() };
+}
+
+/// 发布并冻结信号策略。`none`（不安装 box64 handler）被 C 侧拒绝：dynarec 的
+/// protectDB/auto-SMC 与 guest fatal-signal/SEH 仿真都依赖这四个 handler。
+/// 失败时把 C 侧给出的理由带回；此时尚未创建 context，也没有安装任何 handler。
+pub fn signal_policy_publish() -> anyhow::Result<()> {
+    if unsafe { c_signal_policy_publish() } != 0 {
+        let reason = unsafe { CStr::from_ptr(c_signal_policy_refusal()) }
+            .to_string_lossy()
+            .into_owned();
+        anyhow::bail!("{reason}");
+    }
+    Ok(())
 }
 
 pub fn new_x64emu(context: *mut c_box64_ctx) -> anyhow::Result<NonNull<c_x64emu_t>> {

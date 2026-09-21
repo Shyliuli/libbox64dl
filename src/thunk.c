@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "box64dl_thunk.h"
+#include "libbox64_diag.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -190,8 +191,8 @@ static int free_push(void* rx) {
 void* box64dl_thunk_get(void* target, uint64_t data0, uint64_t data1) {
   void* rx;
   struct slot_data* d;
-  printf("[box64] box64dl_thunk_get target=%p data0=0x%llx.\n", target,
-         (unsigned long long)data0);
+  BOX64_DIAG("[box64] box64dl_thunk_get target=%p data0=0x%llx.\n", target,
+             (unsigned long long)data0);
   if (!target) return NULL;
   pthread_mutex_lock(&g_mu);
 
@@ -253,7 +254,7 @@ static void release_locked(void* rx) {
 }
 
 void box64dl_thunk_release(void* thunk) {
-  printf("[box64] box64dl_thunk_release thunk=%p.\n", thunk);
+  BOX64_DIAG("[box64] box64dl_thunk_release thunk=%p.\n", thunk);
   pthread_mutex_lock(&g_mu);
   release_locked(thunk);
   pthread_mutex_unlock(&g_mu);
