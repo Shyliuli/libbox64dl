@@ -1,5 +1,9 @@
 # libbox64dl patch 0004: known-ABI DynaCall variant for the fixed-arity
-# guest-call seam (box64_call0..6 / box64_call_plan).
+# guest-call seam (historically box64_call0..6 / box64_call_plan).
+#
+# Current libbox64dl exposes this seam through box64_call_simple() and
+# box64_call_desc(); the historical names below remain in this patch because
+# the patch records the original DynaCall_abi introduction.
 #
 # DynaCallCore() is the single body, always_inline with a compile-time
 # `abi_mode`, so each export folds its own arm and no hot run-time branch is

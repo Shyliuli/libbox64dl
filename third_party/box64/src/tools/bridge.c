@@ -101,6 +101,16 @@ void FreeBridge(bridge_t** bridge)
 }
 
 //static const char* default_bridge = "bridge???";
+/* The low half identifies the host function.  For the one-function API the
+ * wrapper is the signature identity; AddBridge2 keeps using fnc2 as its
+ * alternate-function identity.  Keep this key construction in one place so
+ * Check/Add paths cannot disagree. */
+static khint128_t bridge_key(void* fnc, wrapper_t w, void* fnc2)
+{
+    uintptr_t signature = fnc2 ? (uintptr_t)fnc2 : (uintptr_t)w;
+    return (uintptr_t)fnc | (khint128_t)signature<<64;
+}
+
 uintptr_t AddBridge2(bridge_t* bridge, wrapper_t w, void* fnc, void* fnc2, int N, const char* name)
 {
     brick_t *b = NULL;
@@ -116,12 +126,9 @@ uintptr_t AddBridge2(bridge_t* bridge, wrapper_t w, void* fnc, void* fnc2, int N
     }
     sz = b->sz;
     b->sz++;
-    // add bridge to map, for fast recovery
-    khint128_t key = (uintptr_t)fnc | (khint128_t)((uintptr_t)fnc2)<<64;
-    khint_t k = kh_put(bridgemap, bridge->bridgemap, key, &ret);
-    kh_value(bridge->bridgemap, k) = (uintptr_t)&b->b[sz].CC;
-    mutex_unlock(&my_context->mutex_bridge);
-
+    /* Fully initialise the slot while the bridge lock is held.  Publish its
+     * address in the map only after every decoder field is valid; otherwise a
+     * concurrent lookup can observe a half-built thunk. */
     b->b[sz].CC = 0xCC;
     b->b[sz].S = 'S'; b->b[sz].C='C';
     b->b[sz].w = w;
@@ -130,6 +137,13 @@ uintptr_t AddBridge2(bridge_t* bridge, wrapper_t w, void* fnc, void* fnc2, int N
     b->b[sz].N = N;
     b->b[sz].func = fnc2?1:0;
     b->b[sz].name_or_func = fnc2?fnc2:(void*)name;
+
+    // add bridge to map, for fast recovery.  A one-function registration is
+    // keyed by both host function and wrapper (its signature identity).
+    khint128_t key = bridge_key(fnc, w, fnc2);
+    khint_t k = kh_put(bridgemap, bridge->bridgemap, key, &ret);
+    kh_value(bridge->bridgemap, k) = (uintptr_t)&b->b[sz].CC;
+    mutex_unlock(&my_context->mutex_bridge);
 
     return (uintptr_t)&b->b[sz].CC;
 }
@@ -141,8 +155,22 @@ uintptr_t AddBridge(bridge_t* bridge, wrapper_t w, void* fnc, int N, const char*
 
 uintptr_t CheckBridged(bridge_t* bridge, void* fnc)
 {
-    // check if function alread have a bridge (the function wrapper will not be tested)
-    khint_t k = kh_get(bridgemap, bridge->bridgemap, (uintptr_t)fnc);
+    /* Compatibility lookup for callers that intentionally do not know the
+     * wrapper.  AddCheckBridge must use CheckBridgedWrapper below so two
+     * signatures for one host function cannot alias. */
+    khint_t k;
+    for(k=kh_begin(bridge->bridgemap); k!=kh_end(bridge->bridgemap); ++k) {
+        if(kh_exist(bridge->bridgemap, k) &&
+           (void*)(uintptr_t)kh_key(bridge->bridgemap, k) == fnc)
+            return kh_value(bridge->bridgemap, k);
+    }
+    return 0;
+}
+
+static uintptr_t CheckBridgedWrapper(bridge_t* bridge, wrapper_t w, void* fnc)
+{
+    khint128_t key = bridge_key(fnc, w, NULL);
+    khint_t k = kh_get(bridgemap, bridge->bridgemap, key);
     if(k==kh_end(bridge->bridgemap))
         return 0;
     return kh_value(bridge->bridgemap, k);
@@ -151,7 +179,7 @@ uintptr_t CheckBridged(bridge_t* bridge, void* fnc)
 uintptr_t CheckBridged2(bridge_t* bridge, void* fnc, void* fnc2)
 {
     // check if function alread have a bridge (the function wrapper will not be tested)
-    khint128_t key = (uintptr_t)fnc | (khint128_t)((uintptr_t)fnc2)<<64;
+    khint128_t key = bridge_key(fnc, NULL, fnc2);
     khint_t k = kh_get(bridgemap, bridge->bridgemap, key);
     if(k==kh_end(bridge->bridgemap))
         return 0;
@@ -162,7 +190,7 @@ uintptr_t AddCheckBridge(bridge_t* bridge, wrapper_t w, void* fnc, int N, const 
 {
     if(!fnc && w)
         return 0;
-    uintptr_t ret = CheckBridged(bridge, fnc);
+    uintptr_t ret = CheckBridgedWrapper(bridge, w, fnc);
     if(!ret)
         ret = AddBridge(bridge, w, fnc, N, name);
     return ret;

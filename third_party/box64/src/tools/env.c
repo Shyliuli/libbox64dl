@@ -1640,6 +1640,13 @@ void SerializeAllMapping()
 #ifdef DYNAREC
     mapping_t* mapping;
     mutex_lock(&my_context->mutex_dyndump);
+    /* libbox64dl patch 0008: mapping_entries is created lazily by AddMapping();
+     * an embedded context that never dlopen()ed a guest leaves it NULL, and
+     * kh_foreach_value(NULL, ...) dereferences the NULL hash in kh_end(). */
+    if(!mapping_entries) {
+        mutex_unlock(&my_context->mutex_dyndump);
+        return;
+    }
     kh_foreach_value(mapping_entries, mapping, 
         if(MmaplistHasNew(mapping->mmaplist, 1))
             SerializeMmaplist(mapping);

@@ -1,0 +1,29 @@
+# libbox64dl patch 0008 (correctness): SerializeAllMapping() must tolerate an
+# empty mapping table.
+#
+# mapping_entries is a file-static khash created lazily by AddMapping(). An
+# embedded context that runs box64_lib_init() -> box64_lib_fini() without ever
+# dlopen()ing a guest leaves it NULL, and kh_foreach_value(NULL, ...)
+# dereferences the NULL hash inside kh_end(), so endBox64() segfaults on a
+# perfectly valid shutdown. Guard the loop; behaviour with mappings present is
+# unchanged.
+#
+# Vendor-only change, kept here so third_party/box64 stays re-syncable; the
+# Makefile patch target applies it.
+
+--- a/src/tools/env.c
++++ b/src/tools/env.c
+@@ -1640,6 +1640,13 @@
+ #ifdef DYNAREC
+     mapping_t* mapping;
+     mutex_lock(&my_context->mutex_dyndump);
++    /* libbox64dl patch 0008: mapping_entries is created lazily by AddMapping();
++     * an embedded context that never dlopen()ed a guest leaves it NULL, and
++     * kh_foreach_value(NULL, ...) dereferences the NULL hash in kh_end(). */
++    if(!mapping_entries) {
++        mutex_unlock(&my_context->mutex_dyndump);
++        return;
++    }
+     kh_foreach_value(mapping_entries, mapping, 
+         if(MmaplistHasNew(mapping->mmaplist, 1))
+             SerializeMmaplist(mapping);

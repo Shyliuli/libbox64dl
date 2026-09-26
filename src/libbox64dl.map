@@ -1,0 +1,50 @@
+/*
+ * libbox64dl.so export map.
+ *
+ * The DSO is the engine. box64's own librarian resolves wrapped-library
+ * entry points with
+ *
+ *     dlsym(my_context->box64lib, "my_" + name)      (and altmy variants)
+ *
+ * where `my_context->box64lib` is rebound to THIS module by
+ * box64dl_core_rebind(). A dlsym() against a specific dlopen handle only sees
+ * that module's DYNAMIC symbol table, so the engine-internal `my*` wrappers
+ * have to be dynamic even though they are not public API. Localising them
+ * (the previous `global: box64_*` only map) made every wrapped-libc lookup
+ * fail, so no DT_NEEDED libc guest could run.
+ *
+ * The dynamic surface has three classes; everything else is local:
+ *   - public embed ABI:  box64_*          -> dynamic (consumers link these)
+ *   - runtime trampolines: box64dl_thunk_* -> dynamic (the primitive declared
+ *                                           by include/box64dl_thunk.h): a
+ *                                           guest->host callable thunk cannot
+ *                                           be built by a consumer, so the
+ *                                           engine owns the registry and a
+ *                                           DSO consumer (uninode's PE
+ *                                           bridge) has to link these. The
+ *                                           asm data symbols (`*_code*`) stay
+ *                                           local.
+ *   - engine wrappers:   my*              -> dynamic (dlsym target above);
+ *                                           includes my_/my2_/my32_ plus every
+ *                                           altmy prefix (my3_, my66_, myw6_, ...)
+ *   - everything else:   *                -> local, so the Rust runtime
+ *                                           (_ZN...), the private
+ *                                           box64dl_core_* shim and box64
+ *                                           internals stay invisible.
+ *
+ * `my*` also picks up box64's `my_context` global; that matches upstream
+ * box64, whose executable exports all of these with -rdynamic.
+ */
+{
+  global:
+    box64_*;
+    box64dl_thunk_get;
+    box64dl_thunk_peek;
+    box64dl_thunk_data0;
+    box64dl_thunk_release;
+    box64dl_thunk_release_range;
+    box64dl_thunk_count;
+    my*;
+  local:
+    *;
+};

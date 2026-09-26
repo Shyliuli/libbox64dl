@@ -11,7 +11,7 @@
  * patches are no-ops on this path (0003's host-route never fires without
  * foreign host threads; 0002 only silences the default log).
  */
-#include "libbox64.h"
+#include "box64_main.h"
 
 int main(int argc, const char** argv, char** env) {
     return box64_main(argc, argv, env);

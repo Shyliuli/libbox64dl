@@ -4250,6 +4250,31 @@ wrappedavahicommon:
 wrappedayatanaappindicator3:
 wrappedayatanaido3:
 wrappedayatanaindicator3:
+wrappedbox64dnative:
+- vFpp:
+  - seam_vFEpp
+- iFpip:
+  - seam_iFEpip
+- iFppp:
+  - seam_iFEppp
+- iFppLp:
+  - seam_iFEppLp
+- iFpppp:
+  - seam_iFEpppp
+- iFppppp:
+  - seam_iFEppppp
+- iFpLpppp:
+  - seam_iFEpLpppp
+- iFppLppp:
+  - seam_iFEppLppp
+- iFpppppp:
+  - seam_iFEpppppp
+- iFppppppp:
+  - seam_iFEppppppp
+- iFppLppLpp:
+  - seam_iFEppLppLpp
+- iFppppLLppppp:
+  - seam_iFEppppLLppppp
 wrappedbrotlidec:
 - pFppp:
   - BrotliDecoderCreateInstance
@@ -6212,34 +6237,6 @@ wrappedlibnettle8:
   - nettle_ccm_encrypt_message
 - iFppLpLpLLpp:
   - nettle_ccm_decrypt_message
-wrappedlibnode:
-- vFpp:
-  - uv_close
-- iFpip:
-  - uv_poll_start
-- iFppp:
-  - napi_add_env_cleanup_hook
-  - napi_remove_env_cleanup_hook
-- iFppLp:
-  - napi_define_properties
-- iFpppp:
-  - napi_set_instance_data
-- iFppppp:
-  - napi_create_external
-- iFpLpppp:
-  - napi_create_external_buffer
-- iFppLppp:
-  - napi_create_external_arraybuffer
-  - napi_create_function
-- iFpppppp:
-  - napi_add_finalizer
-  - napi_wrap
-- iFppppppp:
-  - napi_create_async_work
-- iFppLppLpp:
-  - napi_define_class
-- iFppppLLppppp:
-  - napi_create_threadsafe_function
 wrappedlibnuma:
 wrappedlibogg:
 wrappedlibomp:

@@ -1,0 +1,41 @@
+# libbox64dl explicit plugin set. Copy to plugins.conf (or pass as
+# PLUGIN_CONFIG=<path>) to make the *set of grafted plugin directories* explicit.
+#
+# One `name = path` line per plugin. `path` is the plugin directory, absolute or
+# relative to the libbox64dl repo root, and must contain library_list.inc,
+# wrapped<lib>.c and wrapped<lib>_private.h. Blank lines and `#` comments are
+# ignored; paths must not contain spaces.
+#
+# SCOPE -- what this does and does not pin:
+#   * It pins WHICH directories are grafted and where they resolve to. It
+#     deliberately does not restrict dynamic-symbol visibility: the wrapped
+#     library tables keep exporting the `my_*` / wrapper symbols box64's dlsym
+#     path may look up.
+#   * It pins a LOCATION, not a version. A path carries no commit, tag or file
+#     hash of the plugin sources, so a sibling checkout can change under the same
+#     path. Content-level reproducibility needs the plugin's own revision pinned
+#     (and, ideally, hashes recorded) -- that is outside this file.
+#   * Without plugins.conf the build grafts every plugins/<name>/ entry, which
+#     keeps the developer symlink workflow working -- including absolute symlinks
+#     into a sibling checkout, e.g. uninode's:
+#
+#       plugins/libnode -> /home/<user>/.../uninode/wrapped
+#
+#     That default set is untracked and machine-specific; this example does not
+#     fix it, and no release build should claim full reproducibility from it
+#     until the plugin sources themselves are pinned.
+#
+# Generate this file from the currently resolved set, then review and commit it:
+#
+#   make -C libbox64dl plugin-manifest > plugins.conf
+#
+# `make -C libbox64dl check-plugins` validates the set and warns about plugin
+# directories that resolve outside this repository.
+#
+# libgccs is the in-repo plugin; keep it in any explicit manifest or wine's
+# libgcc unwinding symbols are gone.
+libgccs = plugins/libgccs
+
+# A downstream plugin resolved through its checkout, pinned by path (location
+# only, not a version):
+# libnode = ../uninode/wrapped

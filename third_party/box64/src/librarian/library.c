@@ -27,6 +27,10 @@
 #include "symbols.h"
 #include "elfs/elfloader_private.h"
 #include "library_inner.h"
+/* Engine-owned explicit native-module seam (src/native_module_lib.c): a
+ * provider that called box64_register_native_module() before the first
+ * box64_dlopen() can claim a soname the static wrapped table does not list. */
+#include "native_module_lib.h"
 
 #include "wrappedlibs.h"
 // create the native lib list
@@ -258,7 +262,18 @@ int DummyLib_GetLocal(library_t* lib, const char* name, uintptr_t *offs, uintptr
     return 0;
 }
 
-static void initWrappedLib(library_t *lib, box64context_t* context) {
+/* Returns 0 when the caller may continue (static wrapped table, emulated
+ * fallback), or non-zero when a registered descriptor CLAIMED this soname and
+ * the load failed closed: the caller must abort instead of falling through. */
+static int initWrappedLib(library_t *lib, box64context_t* context) {
+    /* Explicit native-module seam: if a registered descriptor claims this
+     * soname, build the runtime wrapped library from it and stop. The static
+     * wrapped table is only consulted when no descriptor claims the soname. */
+    int nm = box64dl_native_module_init_wrapped(lib, context);
+    if (nm > 0)
+        return 0;
+    if (nm < 0)
+        return -1;
     int nb = (box64_is32bits?sizeof(wrappedlibs32):sizeof(wrappedlibs)) / sizeof(wrappedlib_t);
     for (int i=0; i<nb; ++i) {
         wrappedlib_t* w = box64_is32bits?(&wrappedlibs32[i]):(&wrappedlibs[i]);
@@ -270,7 +285,7 @@ static void initWrappedLib(library_t *lib, box64context_t* context) {
                     if (error_str) // don't print the message if there is no error string from last error
                         printf_log(LOG_NONE, "Error initializing native %s (last dlerror is %s)\n", lib->name, error_str);
                 }
-                return; // non blocker...
+                return 0; // non blocker...
             }
             printf_dump(LOG_INFO, "Using native(wrapped) %s\n", lib->name);
             lib->fini = w->fini;
@@ -282,7 +297,7 @@ static void initWrappedLib(library_t *lib, box64context_t* context) {
             // Call librarian to load all dependant elf
             if(AddNeededLib(context->maplib, 0, 0, 0, lib->w.needed, NULL, context, thread_get_emu())) {
                 printf_log(LOG_NONE, "Error: loading a needed libs in elf %s\n", lib->name);
-                return;
+                return 0;
             }
 
             linkmap_t *lm = addLinkMapLib(lib);
@@ -307,6 +322,7 @@ static void initWrappedLib(library_t *lib, box64context_t* context) {
             break;
         }
     }
+    return 0;
 }
 
 static int loadEmulatedLib(const char* libname, library_t *lib, box64context_t* context, elfheader_t* verneeded)
@@ -555,13 +571,27 @@ library_t *NewLibrary(const char* path, box64context_t* context, elfheader_t* ve
     // And now, actually loading a library
     // look for native(wrapped) libs first
     if(!notwrapped && !precise)
-        initWrappedLib(lib, context);
+        if(initWrappedLib(lib, context)) {
+            /* A claiming descriptor failed closed. Do NOT continue to
+             * initEmulatedLib(): a same-named x86_64 guest ELF in the search
+             * path must not be loaded, and its constructors must not run. */
+            box_free(lib->name);
+            box_free(lib->path);
+            initDummyLib(lib);
+            return NULL;
+        }
     // then look for a native one
     if(lib->type==LIB_UNNKNOW)
         initEmulatedLib(path, lib, context, verneeded, rpath);
     // still not loaded but notwrapped indicated: use wrapped...
     if(lib->type==LIB_UNNKNOW && notwrapped && !precise)
-        initWrappedLib(lib, context);
+        if(initWrappedLib(lib, context)) {
+            /* Same fail-closed rule on the notwrapped path. */
+            box_free(lib->name);
+            box_free(lib->path);
+            initDummyLib(lib);
+            return NULL;
+        }
     // nothing loaded, so error...
     if(lib->type==LIB_UNNKNOW)
     {

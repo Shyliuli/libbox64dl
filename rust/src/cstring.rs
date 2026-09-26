@@ -1,5 +1,6 @@
+#![allow(dead_code)] // a general-purpose buffer: not every method is used yet
 use std::borrow::Borrow;
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 use std::fmt;
 use std::ops::Deref;
 

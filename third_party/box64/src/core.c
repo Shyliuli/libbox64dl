@@ -690,11 +690,17 @@ void endBox64()
     printf_log(LOG_DEBUG, "Calling fini for all loaded elfs and unload native libs\n");
     //void closeAllDLOpened();
     //closeAllDLOpened();    // close residual dlopened libs. Disabled, seems like a bad idea, better to unload with proper dependancies
-    RunElfFini(my_context->elfs[0], emu);
+    /* libbox64dl patch 0009: an embedded context that never loaded a main ELF
+     * has elfs == NULL or elfs[0] == NULL; skip the main-ELF fini instead of
+     * dereferencing it. */
+    if(my_context->elfs && my_context->elfs[0])
+        RunElfFini(my_context->elfs[0], emu);
     printf_log(LOG_DEBUG, "Finished calling fini for dlopened libs\n");
     finiPendingDLOpenedNoUnload(emu);   // call fini for dlopened libs, but don't unload them, as they might be needed by the main elf fini
     // unload needed libs
-    needed_libs_t* needed = my_context->elfs[0]->needed;
+    needed_libs_t* needed = (my_context->elfs && my_context->elfs[0])
+                                 ? my_context->elfs[0]->needed
+                                 : NULL;
     printf_log(LOG_DEBUG, "Unloaded main elf: Will Dec RefCount of %d libs\n", needed?needed->size:0);
     int workers = get_active_emu_workers();
     if (workers > 0) {

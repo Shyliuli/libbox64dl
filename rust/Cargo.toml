@@ -2,7 +2,9 @@
 name = "libbox64"
 version = "0.1.0"
 edition = "2024"
-description = "Rust facade over the embeddable box64 runtime (FFI to libbox64.a)"
+description = "Rust lifecycle owner and FFI boundary over the embeddable box64 engine"
+license = "MIT"
+build = "build.rs"
 
 [lib]
 name = "libbox64"
@@ -12,15 +14,25 @@ crate-type = ["rlib", "staticlib"]
 [features]
 default = ["link-box64"]
 # Link against ../third_party/box64/build/libbox64.a (and friends).
-# Disable to type-check the Rust side alone: `cargo check --no-default-features`
+# Disable to type-check the Rust side alone: `cargo check --no-default-features`.
 link-box64 = []
 # Build against ../third_party/box64/build-pic (PIC) instead of build/ (static).
-# Use `make rust-pic`, `LIBBOX64_FLAVOR=pic cargo build`, or --features pic.
 pic = []
 
 [dependencies]
-anyhow = "1.0.104"
 libc = "0.2"
 
 [build-dependencies]
 cc = "1"
+bindgen = "0.72"
+
+# The engine sits behind foreign (C) frames that can `longjmp`; a Rust unwind
+# must never cross that boundary. `panic = "abort"` makes any panic terminate
+# instead of unwinding into C. It does NOT make a foreign longjmp safe (that is
+# a structural rule: no live Rust frame between setjmp and longjmp) — see
+# docs/engine-ownership.md.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

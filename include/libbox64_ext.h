@@ -73,14 +73,14 @@ BOX64_API uint64_t box64_bridge_sp(void* emu);
  * "dirty":
  *
  *   - emu RSP still points into the guest thread's Wine PE stack (the TEB
- *     stack). The native host SP is fine, but every later box64_call_regs()
+ *     stack). The native host SP is fine, but every later box64_call_desc()
  *     on this thread starts its guest frame from there.
  *   - guest GS (emu->segs_offs[_GS]) still points at the Wine TEB.
  *
  * Wine's __wine_detach_current_thread() frees exactly those two mappings
  * (thread_data/TEB and the PE stack), and it deliberately refuses to run
  * while the *emulated* SP is inside them (its stack guard). So a detach
- * issued through box64_call_regs() with the dirty RSP is rejected with
+ * issued through box64_call_desc() with the dirty RSP is rejected with
  * STATUS_INVALID_PARAMETER, and even if it were not, the emu would survive
  * pointing into freed memory afterwards.
  *
@@ -121,7 +121,7 @@ BOX64_API uint64_t box64_bridge_sp(void* emu);
  *      longjmp()ed back -- never from inside a bridge callback or any other
  *      frame the guest is still using;
  *   2. in the detach order above, call it AFTER the PE LdrShutdownThread call
- *      and BEFORE the unix detach entry through box64_call_regs(); that
+ *      and BEFORE the unix detach entry through box64_call_desc(); that
  *      entry's guard inspects the emulated SP, so the order cannot be reversed;
  *   3. if it returns non-zero, the emu stack could not be validated: do NOT
  *      call the unix detach entry, leave the thread attached and untouched;
@@ -174,7 +174,7 @@ BOX64_API int box64_detach_current_thread_guest_restore(
  * register restore (dynarec/dynarec.c), so the thread's x64emu_t keeps the RSP
  * the guest PE thread-start code was standing on when it called the bridge: an
  * abandoned frame inside the Wine PE stack. Every later
- * box64_call_regs()/box64_call_marshaled() on that thread would build its guest
+ * box64_call_desc()/box64_call_desc() on that thread would build its guest
  * frame from that stale location.
  *
  * box64_reset_current_thread_guest_stack() is the minimal host-side repair:
@@ -199,7 +199,7 @@ BOX64_API int box64_detach_current_thread_guest_restore(
  *
  * Call timing, from HOST code on the current thread, BETWEEN guest calls:
  * after the bridge longjmp() has returned, or immediately before a new
- * box64_call_regs()/box64_call_marshaled(). Never from inside a bridge callback
+ * box64_call_desc()/box64_call_desc(). Never from inside a bridge callback
  * or any other frame the guest is still using -- that would move the stack out
  * from under the running call. Calling it twice in a row is harmless.
  *
