@@ -21,7 +21,7 @@
  *   call2/g_add2           two real arguments
  *   call0/stats_off        counters off (default)
  *   call0/stats_on         counters on: the cost of the debug bookkeeping
- *   plan0/g_retzero        box64_call_plan() with an empty plan
+ *   plan0/g_retzero        test_desc_plan() with an empty plan
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* clock_gettime, also via -D_GNU_SOURCE on the cc line */
@@ -34,6 +34,7 @@
 #include <time.h>
 
 #include "libbox64.h"
+#include "call_compat.h"
 #include "libbox64_signal.h"
 
 static uint64_t now_ns(void) {
@@ -183,24 +184,24 @@ int main(int argc, char** argv) {
 
   memset(fprs, 0, sizeof(fprs));
   for (i = 0; i < 2000; ++i) {
-    sink += box64_call0(zero);
-    sink += box64_call2(add2, 1, 2);
-    sink += box64_call_plan(zero, &plan0, gprs, fprs, NULL, NULL);
+    sink += test_simple0(zero);
+    sink += test_simple2(add2, 1, 2);
+    sink += test_desc_plan(zero, &plan0, gprs, fprs, NULL, NULL);
   }
 
   t0 = now_ns();
-  for (i = 0; i < n; ++i) sink += box64_call0(zero);
+  for (i = 0; i < n; ++i) sink += test_simple0(zero);
   t1 = now_ns();
   report("call0/g_retzero", n, t0, t1, sink);
 
   t0 = now_ns();
-  for (i = 0; i < n; ++i) sink += box64_call2(add2, 1, 2);
+  for (i = 0; i < n; ++i) sink += test_simple2(add2, 1, 2);
   t1 = now_ns();
   report("call2/g_add2", n, t0, t1, sink);
 
   t0 = now_ns();
   for (i = 0; i < n; ++i)
-    sink += box64_call_plan(zero, &plan0, gprs, fprs, NULL, NULL);
+    sink += test_desc_plan(zero, &plan0, gprs, fprs, NULL, NULL);
   t1 = now_ns();
   report("plan0/g_retzero", n, t0, t1, sink);
 
@@ -209,13 +210,13 @@ int main(int argc, char** argv) {
     long dn = n < 50000 ? n : 50000;
     box64_signal_stats_enable(0);
     t0 = now_ns();
-    for (i = 0; i < dn; ++i) sink += box64_call0(zero);
+    for (i = 0; i < dn; ++i) sink += test_simple0(zero);
     t1 = now_ns();
     report("call0/stats_off", dn, t0, t1, sink);
 
     box64_signal_stats_enable(1);
     t0 = now_ns();
-    for (i = 0; i < dn; ++i) sink += box64_call0(zero);
+    for (i = 0; i < dn; ++i) sink += test_simple0(zero);
     t1 = now_ns();
     report("call0/stats_on", dn, t0, t1, sink);
     box64_signal_stats_enable(0);

@@ -107,7 +107,7 @@ long g_sig_change_then_fire(long marker, unsigned long m1) {
   return g_marker + g_hits;
 }
 
-/* Nested probe: the host callback re-enters the engine through box64_call1 and
+/* Nested probe: the host callback re-enters the engine through the unified scalar call entry and
  * fires the signal while the outer guest call is still on the stack, so the
  * siglongjmp targets the outer EmuRun jmpbuf (nested EmuRun reuses it). */
 long g_sig_invoke(long (*f)(long), long x) { return f(x); }

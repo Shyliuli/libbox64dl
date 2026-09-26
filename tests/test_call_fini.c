@@ -1,10 +1,10 @@
 /*
  * Lifetime guard regression: a call issued AFTER box64_lib_fini() must be
- * refused even though the calling thread still holds an emu. The Rust
- * facade's ready Option can stay Some across fini, so the call entry keys its
- * fast path on the C global context pointer (my_context, NULLed by fini)
- * instead. Before fini the same entries must succeed, which this test also
- * checks, so a guard that refuses everything cannot pass.
+ * refused even though the calling thread still holds an emu. Rust owns the
+ * phase (FINAL after fini) and the C call entry additionally keys its lock-free
+ * fast path on the borrow-validity of the C global context pointer (my_context,
+ * NULLed by box64's own endBox64()). Before fini the same entries must succeed,
+ * which this test also checks, so a guard that refuses everything cannot pass.
  *
  * The guard is a sequential lifetime check, not synchronisation: this test
  * never races fini with calls on other threads.
@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "libbox64.h"
+#include "call_compat.h"
 
 #include "os.h"
 #include "regs.h"
@@ -74,7 +75,7 @@ int main(int argc, char** argv) {
   }
 
   /* Before fini: the same entries work, and the thread has an emu. */
-  check_u64(box64_call0(zero), 0x1234, "before fini: call0 runs the guest");
+  check_u64(test_simple0(zero), 0x1234, "before fini: call0 runs the guest");
   check(box64_dlerror() == NULL, "before fini: error slot clear");
   check(thread_peek_emu() != NULL, "before fini: thread has an emu");
 
@@ -85,22 +86,22 @@ int main(int argc, char** argv) {
   memset(fregs, 0, sizeof(fregs));
   memset(pfprs, 0, sizeof(pfprs));
 
-  check_u64(box64_call0(zero), 0, "after fini: call0 refused (returns 0)");
+  check_u64(test_simple0(zero), 0, "after fini: call0 refused (returns 0)");
   check(box64_dlerror() != NULL, "after fini: call0 records an error");
   check(box64_dlerror() == NULL, "after fini: error slot is read-and-consume");
 
-  check_u64(box64_call_regs(zero, gprs, fregs), 0,
-            "after fini: call_regs refused");
-  check(box64_dlerror() != NULL, "after fini: call_regs records an error");
+  check_u64(test_desc_regs(zero, gprs, fregs), 0,
+            "after fini: descriptor_regs refused");
+  check(box64_dlerror() != NULL, "after fini: descriptor_regs records an error");
 
-  check_u64(box64_call_marshaled(zero, gprs, fregs, NULL, 0), 0,
-            "after fini: call_marshaled refused");
+  check_u64(test_desc_blob(zero, gprs, fregs, NULL, 0), 0,
+            "after fini: descriptor blob refused");
   check(box64_dlerror() != NULL,
-        "after fini: call_marshaled records an error");
+        "after fini: descriptor blob records an error");
 
-  check_u64(box64_call_plan(zero, &plan, gprs, pfprs, NULL, NULL), 0,
-            "after fini: call_plan refused");
-  check(box64_dlerror() != NULL, "after fini: call_plan records an error");
+  check_u64(test_desc_plan(zero, &plan, gprs, pfprs, NULL, NULL), 0,
+            "after fini: descriptor layout refused");
+  check(box64_dlerror() != NULL, "after fini: descriptor layout records an error");
 
   if (g_fail) {
     printf("[call-fini] RESULT: FAIL (%d checks)\n", g_checks);

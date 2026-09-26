@@ -1,6 +1,7 @@
 /*
- * Regression for the compiled-layout seam box64_call_plan()
- * (include/libbox64.h) — the entry BUILD-TIME generated stubs use.
+ * Regression for the compiled-layout seam test_desc_plan()
+ * (tests/call_compat.h, built on box64_call_desc()) — the entry BUILD-TIME
+ * generated stubs use.
  *
  * Three kinds of evidence, all against a real x86_64 guest object:
  *
@@ -29,6 +30,7 @@
 #include <string.h>
 
 #include "libbox64.h"
+#include "call_compat.h"
 
 #include "os.h"
 #include "regs.h"
@@ -101,7 +103,7 @@ static double plan_xmm0(void* s, const box64_sigplan_t* p, const uint64_t* gprs,
                         const box64_fpr_t* fprs, const void* stack) {
   box64_call_results_t r;
   memset(&r, 0, sizeof(r));
-  box64_call_plan(s, p, gprs, fprs, stack, &r);
+  test_desc_plan(s, p, gprs, fprs, stack, &r);
   return lo_double(&r);
 }
 
@@ -112,7 +114,7 @@ static float plan_xmm0_f(void* s, const box64_sigplan_t* p,
                          const void* stack) {
   box64_call_results_t r;
   memset(&r, 0, sizeof(r));
-  box64_call_plan(s, p, gprs, fprs, stack, &r);
+  test_desc_plan(s, p, gprs, fprs, stack, &r);
   return lo_float(&r);
 }
 
@@ -130,7 +132,7 @@ static uint64_t cb_align6(uint64_t a, uint64_t b, uint64_t c, uint64_t d,
   (void)f;
   /* Re-enter the engine from inside a bridge callback and record the entry
    * parity the nested call sees. */
-  g_reentry_align = box64_call0(g_align_sym);
+  g_reentry_align = test_simple0(g_align_sym);
   return a;
 }
 
@@ -195,7 +197,7 @@ int main(int argc, char** argv) {
     fprs[0].hi = 0x99aabbccddeeff00ull;
     fprs[1].lo = 0x0f1e2d3c4b5a6978ull;
     fprs[1].hi = 0x8877665544332211ull;
-    box64_call_plan(s_probe, &p, gprs, fprs, NULL, NULL);
+    test_desc_plan(s_probe, &p, gprs, fprs, NULL, NULL);
 
     check(memcmp(probe + 0, &gprs[0], 8) == 0, "probe: rdi written");
     check(memcmp(probe + 8, &gprs[1], 8) == 0, "probe: rsi written");
@@ -218,7 +220,7 @@ int main(int argc, char** argv) {
     memset(fprs, 0, sizeof(fprs));
     fprs[1].lo = 0x1234567890abcdefull;
     fprs[1].hi = 0xfedcba0987654321ull;
-    box64_call_plan(s_probe, &p, gprs, fprs, NULL, NULL);
+    test_desc_plan(s_probe, &p, gprs, fprs, NULL, NULL);
     check(memcmp(probe + 0, &gprs[0], 8) == 0, "sparse: rdi (bit 0) written");
     check(memcmp(probe + 40, &gprs[5], 8) == 0, "sparse: r9 (bit 5) written");
     check(memcmp(probe + 64, &fprs[1], 16) == 0,
@@ -229,7 +231,7 @@ int main(int argc, char** argv) {
    * The SysV/Win64 entry contract is rsp % 16 == 8, because DynaCall's
    * PushExit(-8) pushes the exit slot and the first stack argument sits at
    * entry rsp+8 (16-aligned). The engine must produce the same parity on every
-   * path — no stack, floating point, stack aggregates, and the old APIs — or a
+   * path — no stack, floating point, stack aggregates, and the descriptor adapter coverage — or a
    * callee's aligned SSE access faults. align_probe() reports rsp%16 directly;
    * align_probe_sse() does a real movaps to [rsp+8] (a hard fault if wrong). */
   {
@@ -244,24 +246,24 @@ int main(int argc, char** argv) {
     memset(pf, 0, sizeof(pf));
     memset(blob, 0, sizeof(blob));
 
-    check_u64(box64_call0(s_align), 8, "align: call0 entry rsp%16 == 8");
-    check_u64(box64_call1(s_align, 0), 8, "align: call1 entry rsp%16 == 8");
-    check_u64(box64_call_plan(s_align, &p_none, ag, NULL, NULL, NULL), 8,
+    check_u64(test_simple0(s_align), 8, "align: call0 entry rsp%16 == 8");
+    check_u64(test_simple1(s_align, 0), 8, "align: call1 entry rsp%16 == 8");
+    check_u64(test_desc_plan(s_align, &p_none, ag, NULL, NULL, NULL), 8,
               "align: plan(no stack) entry rsp%16 == 8");
-    check_u64(box64_call_plan(s_align, &p_st24, ag, NULL, blob, NULL), 8,
+    check_u64(test_desc_plan(s_align, &p_st24, ag, NULL, blob, NULL), 8,
               "align: plan(24B stack) entry rsp%16 == 8");
-    check_u64(box64_call_plan(s_align, &p_st40, ag, NULL, blob, NULL), 8,
+    check_u64(test_desc_plan(s_align, &p_st40, ag, NULL, blob, NULL), 8,
               "align: plan(40B stack) entry rsp%16 == 8");
-    check_u64(box64_call_regs(s_align, ag, af), 8,
-              "align: old call_regs entry rsp%16 == 8");
-    check_u64(box64_call_marshaled(s_align, ag, af, blob, 24), 8,
-              "align: old call_marshaled(24B) entry rsp%16 == 8");
-    check_u64(box64_call_marshaled(s_align, ag, af, NULL, 0), 8,
-              "align: old call_marshaled(no stack) entry rsp%16 == 8");
+    check_u64(test_desc_regs(s_align, ag, af), 8,
+              "align: descriptor register-file adapter entry rsp%16 == 8");
+    check_u64(test_desc_blob(s_align, ag, af, blob, 24), 8,
+              "align: descriptor blob adapter(24B) entry rsp%16 == 8");
+    check_u64(test_desc_blob(s_align, ag, af, NULL, 0), 8,
+              "align: descriptor blob adapter(no stack) entry rsp%16 == 8");
 
     /* Real aligned SSE access. If the parity is wrong this SIGSEGVs, which is
      * the point: the check is not a value comparison. */
-    box64_call_plan(s_align_sse, &p_fp, NULL, pf, NULL, NULL);
+    test_desc_plan(s_align_sse, &p_fp, NULL, pf, NULL, NULL);
     check(1, "align: movaps to [rsp+8] succeeded (16-byte aligned slot)");
   }
 
@@ -354,8 +356,8 @@ int main(int argc, char** argv) {
     memcpy(blob + 16, &spv, 8);
     memset(&rt, 0, sizeof(rt));
     memset(&ro, 0, sizeof(ro));
-    box64_call_plan(s_inner, &p_t, tg, NULL, blob, &rt);
-    box64_call_plan(s_o_inner, &p_o, og, of, NULL, &ro);
+    test_desc_plan(s_inner, &p_t, tg, NULL, blob, &rt);
+    test_desc_plan(s_o_inner, &p_o, og, of, NULL, &ro);
     check_d(lo_double(&rt), lo_double(&ro),
             "compiler oracle: i(fffp)p 24B struct is MEMORY (stack), p in rsi");
   }
@@ -370,8 +372,8 @@ int main(int argc, char** argv) {
     box64_call_results_t rt, ro;
     memset(&rt, 0, sizeof(rt));
     memset(&ro, 0, sizeof(ro));
-    box64_call_plan(s_big, &p_t, tg, NULL, blob, &rt);
-    box64_call_plan(s_o_big, &p_o, og, NULL, NULL, &ro);
+    test_desc_plan(s_big, &p_t, tg, NULL, blob, &rt);
+    test_desc_plan(s_o_big, &p_o, og, NULL, NULL, &ro);
     check_u64(rt.rax, ro.rax, "compiler oracle: 24-byte struct on the stack");
   }
   {
@@ -383,18 +385,18 @@ int main(int argc, char** argv) {
     box64_call_results_t rt, ro;
     memset(&rt, 0, sizeof(rt));
     memset(&ro, 0, sizeof(ro));
-    box64_call_plan(s_big5, &p_t, tg, NULL, blob, &rt);
-    box64_call_plan(s_o_big5, &p_o, og, NULL, NULL, &ro);
+    test_desc_plan(s_big5, &p_t, tg, NULL, blob, &rt);
+    test_desc_plan(s_o_big5, &p_o, og, NULL, NULL, &ro);
     check_u64(rt.rax, ro.rax,
               "compiler oracle: 40-byte struct on the stack (engine aligns)");
   }
 
   /* --- reentrancy: alignment holds for a nested call ------------------- */
   {
-    void* cb = box64_callback((void*)cb_align6, "ll");
+    void* cb = box64_callback((void*)cb_align6);
     check(cb != NULL, "reentry: box64_callback returns an address");
     if (cb) {
-      check_u64(box64_call2(s_invoke, (uint64_t)(uintptr_t)cb, 5), 6,
+      check_u64(test_simple2(s_invoke, (uint64_t)(uintptr_t)cb, 5), 6,
                 "reentry: g_invoke(cb, 5) == 6");
       check_u64(g_reentry_align, 8,
                 "align: re-entrant call entry rsp%16 == 8");
@@ -411,18 +413,18 @@ int main(int argc, char** argv) {
     uint64_t g[6] = {0};
     box64_fpr_t f[8];
     memset(f, 0, sizeof(f));
-    check_u64(box64_call_plan(s_probe, NULL, g, f, NULL, NULL), 0,
+    check_u64(test_desc_plan(s_probe, NULL, g, f, NULL, NULL), 0,
               "plan: NULL plan refused");
     check(box64_dlerror() != NULL, "plan: NULL plan records an error");
-    check_u64(box64_call_plan(s_probe, &bad_gpr, g, f, NULL, NULL), 0,
+    check_u64(test_desc_plan(s_probe, &bad_gpr, g, f, NULL, NULL), 0,
               "plan: gpr_mask outside 0..5 refused");
-    check_u64(box64_call_plan(s_probe, &bad_fpr, g, f, NULL, NULL), 0,
+    check_u64(test_desc_plan(s_probe, &bad_fpr, g, f, NULL, NULL), 0,
               "plan: fpr_mask outside 0..7 refused");
-    check_u64(box64_call_plan(s_probe, &bad_ret, g, f, NULL, NULL), 0,
+    check_u64(test_desc_plan(s_probe, &bad_ret, g, f, NULL, NULL), 0,
               "plan: ret_mask outside 0..3 refused");
-    check_u64(box64_call_plan(s_probe, &need_arrays, NULL, NULL, NULL, NULL), 0,
+    check_u64(test_desc_plan(s_probe, &need_arrays, NULL, NULL, NULL, NULL), 0,
               "plan: mask with NULL value arrays refused");
-    check_u64(box64_call_plan(s_probe, &need_stack, g, f, NULL, NULL), 0,
+    check_u64(test_desc_plan(s_probe, &need_stack, g, f, NULL, NULL), 0,
               "plan: stack_len with NULL stack refused");
   }
 

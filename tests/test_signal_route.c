@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "libbox64.h"
+#include "call_compat.h"
 
 static int g_fail;
 static int g_checks;
@@ -143,13 +144,13 @@ int main(int argc, char** argv) {
 
   /* Case C (last): host fault from a bridge callback while jmpbuf is armed. */
   {
-    void* cb = box64_callback((void*)host_cb_bad, "IIIIII");
+    void* cb = box64_callback((void*)host_cb_bad);
     check(cb != NULL, "C: callback bridge registered");
     if (cb) {
       g_host_hits = 0;
       g_host_longjmp = 1;
       if (sigsetjmp(g_host_jmp, 1) == 0) {
-        (void)box64_call2(g_invoke, (uint64_t)(uintptr_t)cb, 1);
+        (void)test_simple2(g_invoke, (uint64_t)(uintptr_t)cb, 1);
         check(0, "C: host callback fault unwound to the host action");
       } else {
         check(1, "C: host callback fault unwound to the host action");

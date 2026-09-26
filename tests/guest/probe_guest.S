@@ -60,6 +60,25 @@ align_probe_sse:
     ret
     .size align_probe_sse, .-align_probe_sse
 
+/* The descriptor stack blob is copied at guest entry rsp+8.  These probes
+ * record the first eight bytes of the rounded, zero-filled tail after 24 and
+ * 40 byte blobs respectively. */
+    .globl stack_tail24
+    .type stack_tail24, @function
+stack_tail24:
+    movq    32(%rsp), %rax
+    movq    %rax, (%rdi)
+    ret
+    .size stack_tail24, .-stack_tail24
+
+    .globl stack_tail40
+    .type stack_tail40, @function
+stack_tail40:
+    movq    48(%rsp), %rax
+    movq    %rax, (%rdi)
+    ret
+    .size stack_tail40, .-stack_tail40
+
 /*
  * uint64_t regs_probe(void)
  *
@@ -106,7 +125,7 @@ regs_probe:
  * uint64_t regs_around_callback(uint64_t (*f)(uint64_t), uint64_t x)
  *
  * Keeps a sentinel in R12 across a call to the host bridge `f` (which re-enters
- * the engine through box64_call1). Returns 1 when R12 came back unchanged, i.e.
+ * the engine through the unified scalar call entry). Returns 1 when R12 came back unchanged, i.e.
  * the nested known-ABI call left the outer call's non-volatile register alone.
  * Three pushes leave RSP 16-aligned at the call, so the bridge sees the ABI
  * parity.

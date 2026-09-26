@@ -42,6 +42,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 #include "libbox64.h"
+#include "call_compat.h"
 #include "libbox64_signal.h"
 
 #include "os.h"
@@ -231,7 +232,7 @@ static void* mt_thread(void* p) {
   /* Each thread carries its own mask; the engine must not disturb it. */
   mask_block_one(a->sig);
   for (i = 0; i < 200; ++i) {
-    if (box64_call2(a->add2, (uint64_t)a->idx, (uint64_t)i) !=
+    if (test_simple2(a->add2, (uint64_t)a->idx, (uint64_t)i) !=
         (uint64_t)(a->idx + i)) {
       a->fail = 1;
       return NULL;
@@ -307,15 +308,15 @@ static uint64_t host_cb6(uint64_t a, uint64_t b, uint64_t c, uint64_t d,
   (void)e;
   (void)f;
   /* Re-enter the engine while the outer call is still on the stack. */
-  return box64_call1(g_id, a * 3);
+  return test_simple1(g_id, a * 3);
 }
 
 static int case_reenter(void) {
   box64_signal_stats_t st;
-  void* cb = box64_callback((void*)host_cb6, "IIIIII");
+  void* cb = box64_callback((void*)host_cb6);
   check(cb != NULL, "reenter: callback bridge registered");
   if (!cb) return 0;
-  check_u64(box64_call2(g_invoke, (uint64_t)(uintptr_t)cb, 5), 16,
+  check_u64(test_simple2(g_invoke, (uint64_t)(uintptr_t)cb, 5), 16,
             "reenter: nested engine call from a host bridge");
   memset(&st, 0, sizeof(st));
   box64_signal_stats(&st);
@@ -473,7 +474,7 @@ int main(int argc, char** argv) {
       is_case(mode, "compat-env") || is_case(mode, "api-fast") ||
       is_case(mode, "api-compat")) {
     box64_signal_stats_enable(1);
-    check_u64(box64_call0(g_zero), 0x1234, "call0 runs the guest");
+    check_u64(test_simple0(g_zero), 0x1234, "call0 runs the guest");
     check(box64_dlerror() == NULL, "error slot clear after a real call");
     check(thread_peek_emu() != NULL, "calling thread has an emu");
     memset(&st, 0, sizeof(st));
@@ -528,7 +529,7 @@ int main(int argc, char** argv) {
     check(g_host_segv_hits == 1, "host handler live again after fini");
   }
   if (g_lib)
-    check(box64_call0(g_zero) == 0 && box64_dlerror() != NULL,
+    check(test_simple0(g_zero) == 0 && box64_dlerror() != NULL,
           "post-fini call refused");
 
   return finish();

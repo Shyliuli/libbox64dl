@@ -1,5 +1,5 @@
 /*
- * Regression for the fixed-arity call entries (box64_call0..6) in
+ * Regression for the fixed-arity call entries (test_simple0..6) in
  * include/libbox64.h, the diagnostics switch, and the unchanged behaviour of
  * the old register-file APIs.
  *
@@ -13,21 +13,21 @@
  *      values; a pointer argument; a constructor marker;
  *   2. the 0-return / error-slot contract: a guest returning 0 is NOT a
  *      refusal (box64_dlerror() stays clear), a NULL symbol is;
- *   3. the old APIs still agree: box64_call_regs and box64_call_marshaled with
+ *   3. the descriptor adapter coverage still agree: test_desc_regs and test_desc_blob with
  *      a real outgoing stack blob;
  *   4. stack preservation: the engine restores the pre-call SP, and the guest
  *      can recurse;
  *   5. callback reentrancy: the guest calls a host bridge which re-enters the
- *      engine through box64_call1;
+ *      engine through test_simple1;
  *   6. multithreading: several host threads call the guest concurrently, each
  *      on its own emu;
  *   7. diagnostics: default follows BOX64DL_DIAG (off when unset), and
  *      box64_diag_set() overrides;
- *   8. known-ABI preservation: the fixed-arity entries and box64_call_plan go
+ *   8. known-ABI preservation: the fixed-arity entries and test_desc_plan go
  *      through DynaCall_abi, which drops only the dead RBX/RBP/RDI/RSI
  *      re-restore. A legal guest keeps its non-volatile set (RBX/RBP/R12-R15)
  *      because it restored them itself, and leaves the SysV volatile set
- *      (RDI/RSI/RCX/R8-R11) with the callee; box64_call_regs/marshaled keep the
+ *      (RDI/RSI/RCX/R8-R11) with the callee; test_desc_regs/marshaled keep the
  *      old generic DynaCall behavior (RDI/RSI restored), and a nested ABI call
  *      from a host bridge keeps the outer call's non-volatile registers;
  *   9. the longjmp branch: both entries keep the engine's no-register-restore
@@ -45,6 +45,7 @@
 #include <string.h>
 
 #include "libbox64.h"
+#include "call_compat.h"
 
 #include "os.h"
 #include "regs.h"
@@ -101,7 +102,7 @@ static uint64_t host_cb6(uint64_t a, uint64_t b, uint64_t c, uint64_t d,
   (void)d;
   (void)e;
   (void)f;
-  return box64_call1(g_id_sym, a * 3);
+  return test_simple1(g_id_sym, a * 3);
 }
 
 /* ---- multithreading ----------------------------------------------------- */
@@ -127,7 +128,7 @@ static void* mt_thread(void* p) {
     return NULL;
   }
   for (i = 0; i < 500; ++i) {
-    uint64_t got = box64_call2(a->add2, a->idx, (uint64_t)i);
+    uint64_t got = test_simple2(a->add2, a->idx, (uint64_t)i);
     if (got != a->idx + (uint64_t)i) {
       a->fail = 1;
       break;
@@ -207,69 +208,69 @@ int main(int argc, char** argv) {
 
   /* --- 1/2. fixed arity, 0/error contract ------------------------------ */
 
-  check_u64(box64_call0(s_zero), 0x1234, "call0: 0 args, non-zero return");
-  check_u64(box64_call0(s_ctor), 0x5a5a5a5a5a5a5a5aULL,
+  check_u64(test_simple0(s_zero), 0x1234, "call0: 0 args, non-zero return");
+  check_u64(test_simple0(s_ctor), 0x5a5a5a5a5a5a5a5aULL,
             "call0: guest DT_INIT_ARRAY constructor ran");
-  check_u64(box64_call0(s_retzero), 0, "call0: legitimate 0 return");
+  check_u64(test_simple0(s_retzero), 0, "call0: legitimate 0 return");
   check(box64_dlerror() == NULL,
         "call0: a guest 0 is not a refusal (error slot clear)");
 
-  check_u64(box64_call1(s_id, 0xdeadbeefcafef00dULL),
+  check_u64(test_simple1(s_id, 0xdeadbeefcafef00dULL),
             0xdeadbeefcafef00dULL, "call1: high-bit identity");
-  check_u64(box64_call1(s_id, (uint64_t)-1), (uint64_t)-1,
+  check_u64(test_simple1(s_id, (uint64_t)-1), (uint64_t)-1,
             "call1: pointer-width negative (-1)");
-  check_u64(box64_call2(s_add2, 20, 22), 42, "call2: 20 + 22");
-  check_u64(box64_call2(s_add2, (uint64_t)-3, 3), 0,
+  check_u64(test_simple2(s_add2, 20, 22), 42, "call2: 20 + 22");
+  check_u64(test_simple2(s_add2, (uint64_t)-3, 3), 0,
             "call2: negative + positive");
-  check_u64(box64_call6(s_sum6, 1, 2, 3, 4, 5, 6), 21, "call6: 1..6 = 21");
-  check_u64(box64_call6(s_sum6, 1, 2, 3, 4, 5, (uint64_t)-6), 9,
+  check_u64(test_simple6(s_sum6, 1, 2, 3, 4, 5, 6), 21, "call6: 1..6 = 21");
+  check_u64(test_simple6(s_sum6, 1, 2, 3, 4, 5, (uint64_t)-6), 9,
             "call6: signed value in the last argument register");
 
   /* --- negative int sign handling -------------------------------------- */
-  check_u64(box64_call1(s_neg32, (uint64_t)(int32_t)-5), 5,
+  check_u64(test_simple1(s_neg32, (uint64_t)(int32_t)-5), 5,
             "neg32: -(-5) == 5 (32-bit argument sign-extended correctly)");
-  check_u64(box64_call1(s_neg32, 5), (uint64_t)(int64_t)-5,
+  check_u64(test_simple1(s_neg32, 5), (uint64_t)(int64_t)-5,
             "neg32: -(5) == -5 sign-extended in RAX");
-  check_u64(box64_call1(s_neg64, 5), (uint64_t)(int64_t)-5,
+  check_u64(test_simple1(s_neg64, 5), (uint64_t)(int64_t)-5,
             "neg64: -(5) == -5");
-  check((int64_t)box64_call1(s_neg64, (uint64_t)(int64_t)-7) == 7,
+  check((int64_t)test_simple1(s_neg64, (uint64_t)(int64_t)-7) == 7,
         "neg64: -(-7) == 7");
 
   /* --- pointer argument ------------------------------------------------ */
   val = 0x1122334455667788L;
-  check_u64(box64_call1(s_ptr, (uint64_t)(uintptr_t)&val), (uint64_t)val,
+  check_u64(test_simple1(s_ptr, (uint64_t)(uintptr_t)&val), (uint64_t)val,
             "call1: pointer argument dereferenced in the guest");
 
   /* --- 4. stack preservation ------------------------------------------- */
   rsp_before = emu->regs[_SP].q[0];
-  check_u64(box64_call1(s_deep, 400), 400, "call1: guest recursion used its stack");
+  check_u64(test_simple1(s_deep, 400), 400, "call1: guest recursion used its stack");
   rsp_after = emu->regs[_SP].q[0];
   check(rsp_after == rsp_before,
-        "callN: engine restored the pre-call SP exactly");
+        "arity: engine restored the pre-call SP exactly");
 
-  /* --- 3. old register-file APIs still agree --------------------------- */
+  /* --- historical register-file semantics still agree (FULL_REGS) -------- */
   for (i = 0; i < 6; ++i) gregs[i] = (uint64_t)(i + 1);
   memset(fregs, 0, sizeof(fregs));
-  r = box64_call_regs(s_sum6, gregs, fregs);
-  check_u64(r, 21, "old call_regs: sum6 argument file");
-  check_u64(gregs[0], 21, "old call_regs: gregs[0] carries the return");
+  r = test_desc_regs(s_sum6, gregs, fregs);
+  check_u64(r, 21, "descriptor register-file adapter: sum6 argument file");
+  check_u64(gregs[0], 21, "descriptor register-file adapter: gregs[0] carries the return");
 
   memset(gregs, 0, sizeof(gregs));
-  check_u64(box64_call_regs(s_zero, gregs, fregs), 0x1234,
-            "old call_regs: 0-argument call still works");
+  check_u64(test_desc_regs(s_zero, gregs, fregs), 0x1234,
+            "descriptor register-file adapter: 0-argument call still works");
 
   for (i = 0; i < 6; ++i) mg[i] = (uint64_t)(i + 1);
   for (i = 0; i < 4; ++i) blob[i] = (uint64_t)(i + 7);
   memset(mf, 0, sizeof(mf));
   rsp_before = emu->regs[_SP].q[0];
-  r = box64_call_marshaled(s_sum10, mg, mf, blob, sizeof(blob));
+  r = test_desc_blob(s_sum10, mg, mf, blob, sizeof(blob));
   rsp_after = emu->regs[_SP].q[0];
-  check_u64(r, 55, "old call_marshaled: 6 register + 4 stack args = 55");
+  check_u64(r, 55, "descriptor blob adapter: 6 register + 4 stack args = 55");
   check(rsp_after == rsp_before,
-        "old call_marshaled: outgoing stack fully reclaimed");
+        "descriptor blob adapter: outgoing stack fully reclaimed");
 
   /* --- engine refusal is distinguishable ------------------------------- */
-  check_u64(box64_call0(NULL), 0, "call0(NULL): refusal returns 0");
+  check_u64(test_simple0(NULL), 0, "call0(NULL): refusal returns 0");
   check(box64_dlerror() != NULL, "call0(NULL): refusal records an error");
   check(box64_dlerror() == NULL, "error slot is read-and-consume");
 
@@ -278,12 +279,12 @@ int main(int argc, char** argv) {
    * clear it, so the slot is empty afterwards. Reading first would consume it
    * and prove nothing about the clear. */
   box64_set_err("stale");
-  check_u64(box64_call0(s_zero), 0x1234, "stale: a real call still runs");
+  check_u64(test_simple0(s_zero), 0x1234, "stale: a real call still runs");
   check(box64_dlerror() == NULL, "stale: a successful call cleared the slot");
 
   /* A refusal must overwrite a stale error, not hand the stale text back. */
   box64_set_err("stale2");
-  check_u64(box64_call0(NULL), 0, "stale2: refusal returns 0");
+  check_u64(test_simple0(NULL), 0, "stale2: refusal returns 0");
   {
     const char* e = box64_dlerror();
     check(e != NULL, "stale2: refusal records a fresh error");
@@ -293,10 +294,10 @@ int main(int argc, char** argv) {
 
   /* --- 5. callback reentrancy ------------------------------------------ */
   {
-    void* cb = box64_callback((void*)host_cb6, "ll");
+    void* cb = box64_callback((void*)host_cb6);
     check(cb != NULL, "box64_callback returns a guest-callable address");
     if (cb) {
-      check_u64(box64_call2(s_invoke, (uint64_t)(uintptr_t)cb, 7), 22,
+      check_u64(test_simple2(s_invoke, (uint64_t)(uintptr_t)cb, 7), 22,
                 "callback re-enters the engine (7*3+1 == 22)");
     }
   }
@@ -320,7 +321,7 @@ int main(int argc, char** argv) {
 
     check(s_regs != NULL && s_around != NULL, "ABI probes are exported");
 
-    /* ABI mode (box64_call0): the callee restored its non-volatile set, so it
+    /* ABI mode (test_simple0): the callee restored its non-volatile set, so it
      * survives; the SysV volatile set is the callee's to change and must NOT
      * be asserted as preserved. */
     emu->regs[_BX].q[0] = NV_BX;
@@ -329,7 +330,7 @@ int main(int argc, char** argv) {
     emu->regs[_R13].q[0] = NV_R13;
     emu->regs[_R14].q[0] = NV_R14;
     emu->regs[_R15].q[0] = NV_R15;
-    check_u64(box64_call0(s_regs), MARK, "ABI mode: call0 reaches the guest");
+    check_u64(test_simple0(s_regs), MARK, "ABI mode: call0 reaches the guest");
     check_u64(emu->regs[_BX].q[0], NV_BX, "ABI mode: RBX preserved (non-volatile)");
     check_u64(emu->regs[_BP].q[0], NV_BP, "ABI mode: RBP preserved (non-volatile)");
     check_u64(emu->regs[_R12].q[0], NV_R12, "ABI mode: R12 preserved (non-volatile)");
@@ -349,16 +350,16 @@ int main(int argc, char** argv) {
       memset(&out, 0, sizeof(out));
       emu->regs[_BX].q[0] = NV_BX;
       emu->regs[_R12].q[0] = NV_R12;
-      r = box64_call_plan(s_regs, &plan, NULL, NULL, NULL, &out);
-      check_u64(r, MARK, "ABI mode: call_plan reaches the guest");
-      check_u64(out.rax, MARK, "ABI mode: call_plan ret_mask rax");
-      check_u64(emu->regs[_BX].q[0], NV_BX, "ABI mode: call_plan keeps RBX");
-      check_u64(emu->regs[_R12].q[0], NV_R12, "ABI mode: call_plan keeps R12");
-      check_u64(emu->regs[_DI].q[0], V_DI, "ABI mode: call_plan leaves RDI to the callee");
+      r = test_desc_plan(s_regs, &plan, NULL, NULL, NULL, &out);
+      check_u64(r, MARK, "ABI mode: descriptor layout reaches the guest");
+      check_u64(out.rax, MARK, "ABI mode: descriptor layout ret_mask rax");
+      check_u64(emu->regs[_BX].q[0], NV_BX, "ABI mode: descriptor layout keeps RBX");
+      check_u64(emu->regs[_R12].q[0], NV_R12, "ABI mode: descriptor layout keeps R12");
+      check_u64(emu->regs[_DI].q[0], V_DI, "ABI mode: descriptor layout leaves RDI to the callee");
     }
 
     /* Generic mode keeps the historical DynaCall rule: RDI/RSI come back from
-     * the caller's register file. box64_call_regs() writes the return value
+     * the caller's register file. test_desc_regs() writes the return value
      * into gregs[0]/[1], so keep the inputs before the call. */
     for (i = 0; i < 6; ++i) gregs[i] = 0x1000 + (uint64_t)i;
     memset(fregs, 0, sizeof(fregs));
@@ -371,8 +372,8 @@ int main(int argc, char** argv) {
     {
       const uint64_t di_in = gregs[0];
       const uint64_t si_in = gregs[1];
-      r = box64_call_regs(s_regs, gregs, fregs);
-      check_u64(r, MARK, "generic mode: call_regs reaches the guest");
+      r = test_desc_regs(s_regs, gregs, fregs);
+      check_u64(r, MARK, "generic mode: descriptor_regs reaches the guest");
       check_u64(emu->regs[_DI].q[0], di_in,
                 "generic mode: DynaCall still restores RDI");
       check_u64(emu->regs[_SI].q[0], si_in,
@@ -387,10 +388,10 @@ int main(int argc, char** argv) {
     /* A nested ABI call from a host bridge must leave the outer call's
      * non-volatile registers alone. */
     {
-      void* cb = box64_callback((void*)host_cb6, "ll");
+      void* cb = box64_callback((void*)host_cb6);
       check(cb != NULL, "ABI nesting: box64_callback returns an address");
       if (cb)
-        check_u64(box64_call2(s_around, (uint64_t)(uintptr_t)cb, 7), 1,
+        check_u64(test_simple2(s_around, (uint64_t)(uintptr_t)cb, 7), 1,
                   "ABI mode: nested bridge call keeps the outer R12");
     }
   }
@@ -417,7 +418,7 @@ int main(int argc, char** argv) {
       emu->regs[_SP].q[0] = ALIGNED_SP | 0x8u;
       emu->flags.quitonlongjmp = 1;
       emu->flags.longjmp = 1;
-      r = box64_call0(s_regs);
+      r = test_simple0(s_regs);
       check_u64(r, MARK, "longjmp branch: ABI entry returns the guest RAX");
       check(emu->flags.quitonlongjmp == 1, "longjmp branch: quitonlongjmp kept");
       check(emu->flags.longjmp == 0,
@@ -435,7 +436,7 @@ int main(int argc, char** argv) {
       emu->regs[_SP].q[0] = ALIGNED_SP | 0x8u;
       emu->flags.quitonlongjmp = 1;
       emu->flags.longjmp = 1;
-      r = box64_call_regs(s_regs, gregs, fregs);
+      r = test_desc_regs(s_regs, gregs, fregs);
       check_u64(r, MARK, "longjmp branch: generic entry returns the guest RAX");
       check(emu->flags.longjmp == 0,
             "longjmp branch: generic entry applies the same rule");

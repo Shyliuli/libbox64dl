@@ -47,6 +47,7 @@
 #include <unistd.h>
 
 #include "libbox64.h"
+#include "call_compat.h"
 #include "libbox64_ext.h"    /* foreign-loader image-policy seam */
 #include "libbox64_signal.h" /* internal: capacity bound unit check */
 
@@ -107,7 +108,7 @@ static uint64_t host_cb_mixed(uint64_t a, uint64_t b, uint64_t c, uint64_t d,
   (void)d;
   (void)e;
   (void)f;
-  return box64_call2(g_inner_fire, g_inner_marker, g_inner_m1);
+  return test_simple2(g_inner_fire, g_inner_marker, g_inner_m1);
 }
 
 static int mixed_run(void* A, void* B, void* invoke_a, void* fire_b,
@@ -126,7 +127,7 @@ static int mixed_run(void* A, void* B, void* invoke_a, void* fire_b,
   check(box64_signal_policy_set_library(
             B, inner_fast ? BOX64_SIGNAL_POLICY_FAST : BOX64_SIGNAL_POLICY_COMPAT) == 0,
         "mixed: inner policy set");
-  cb = box64_callback((void*)host_cb_mixed, "IIIIII");
+  cb = box64_callback((void*)host_cb_mixed);
   check(cb != NULL, "mixed: nested callback bridge registered");
   if (!cb) return 0;
 
@@ -135,9 +136,9 @@ static int mixed_run(void* A, void* B, void* invoke_a, void* fire_b,
   g_inner_m1 = m1;
 
   mask_block_one(SIGUSR2); /* M0 */
-  before = box64_call0(hits_b);
-  (void)box64_call2(invoke_a, (uint64_t)(uintptr_t)cb, 0);
-  after = box64_call0(hits_b);
+  before = test_simple0(hits_b);
+  (void)test_simple2(invoke_a, (uint64_t)(uintptr_t)cb, 0);
+  after = test_simple0(hits_b);
   check(after > before, "mixed: real SIGUSR1 handler ran in the inner scope");
 
   if (inner_fast) {
@@ -200,7 +201,7 @@ struct thr_arg {
 static void* thr_call(void* p) {
   struct thr_arg* a = (struct thr_arg*)p;
   box64_signal_stats_t st;
-  if (box64_ensure_emu() != 0 || box64_call0(a->sym) != a->want) {
+  if (box64_ensure_emu() != 0 || test_simple0(a->sym) != a->want) {
     a->fail = 1;
     return NULL;
   }
@@ -409,7 +410,7 @@ int main(int argc, char** argv) {
       box64_signal_stats_enable(1);
       memset(&a, 0, sizeof(a));
       box64_signal_stats(&a);
-      (void)box64_call0(zero);
+      (void)test_simple0(zero);
       memset(&b, 0, sizeof(b));
       box64_signal_stats(&b);
       check(b.setjmp_skips > a.setjmp_skips && b.setjmp_saves == a.setjmp_saves,
@@ -418,7 +419,7 @@ int main(int argc, char** argv) {
             "counter: A set COMPAT");
       memset(&a, 0, sizeof(a));
       box64_signal_stats(&a);
-      (void)box64_call0(zero);
+      (void)test_simple0(zero);
       memset(&b, 0, sizeof(b));
       box64_signal_stats(&b);
       check(b.setjmp_saves > a.setjmp_saves && b.setjmp_skips == a.setjmp_skips,
@@ -427,7 +428,7 @@ int main(int argc, char** argv) {
             "counter: A back to FAST (override cleared)");
       memset(&a, 0, sizeof(a));
       box64_signal_stats(&a);
-      (void)box64_call0(zero);
+      (void)test_simple0(zero);
       memset(&b, 0, sizeof(b));
       box64_signal_stats(&b);
       check(b.setjmp_skips > a.setjmp_skips && b.setjmp_saves == a.setjmp_saves,
@@ -498,7 +499,7 @@ int main(int argc, char** argv) {
     check(install_b && invoke_a && fire_b && hits_b,
           "mixed: guest symbols resolved");
     if (install_b && invoke_a && fire_b && hits_b) {
-      check(box64_call0(install_b) == 0,
+      check(test_simple0(install_b) == 0,
             "mixed: guest SIGUSR1 handler installed (sa_mask=SIGALRM)");
       /* outer FAST, inner COMPAT: the inner frame must force a new jmpbuf and
        * the resume must restore the inner M0, not keep the outer FAST M1. */

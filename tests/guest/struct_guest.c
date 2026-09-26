@@ -85,3 +85,37 @@ long oracle_big5(long x, long a, long b, long c, long d, long e) {
   struct big5 s = {a, b, c, d, e};
   return target_big5(x, s);
 }
+
+/* --- ret_big: a 24-byte return, so SysV64 returns it in MEMORY ---------
+ * `target_ret_big` takes its single declared `long` in rsi (rdi is the hidden
+ * destination pointer), writes the aggregate through that pointer and returns
+ * the pointer in rax. The three fields are full-width, byte-order-sensitive
+ * functions of x, so a host that only reads the returned bytes can still tell
+ * the fields and their endianness apart.
+ *
+ * The oracle cannot return the struct without re-entering the same sret path,
+ * so it exposes each field as an ordinary scalar `long` return computed by the
+ * same compiler; comparing the decoded aggregate bytes against it makes the
+ * compiler, not a hand-derived placement rule, the authority. */
+struct ret_big {
+  long a, b, c;
+};
+
+struct ret_big target_ret_big(long x) {
+  struct ret_big r;
+  r.a = x;
+  r.b = ~x;
+  r.c = -x;
+  return r;
+}
+
+long oracle_ret_big(long x, long field) {
+  switch (field) {
+    case 0:
+      return x;
+    case 1:
+      return ~x;
+    default:
+      return -x;
+  }
+}

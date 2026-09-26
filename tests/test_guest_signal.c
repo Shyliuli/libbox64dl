@@ -38,6 +38,7 @@
 #include <string.h>
 
 #include "libbox64.h"
+#include "call_compat.h"
 
 static int g_fail;
 static int g_checks;
@@ -89,8 +90,8 @@ static pthread_mutex_t g_fire_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t fire_locked(uint64_t marker, uint64_t* hits) {
   uint64_t got;
   pthread_mutex_lock(&g_fire_mu);
-  got = box64_call1(g_fire, marker);
-  *hits = box64_call0(g_hits);
+  got = test_simple1(g_fire, marker);
+  *hits = test_simple0(g_hits);
   pthread_mutex_unlock(&g_fire_mu);
   return got;
 }
@@ -131,7 +132,7 @@ static uint64_t host_cb_fire(uint64_t a, uint64_t b, uint64_t c, uint64_t d,
   (void)d;
   (void)e;
   (void)f;
-  return box64_call1(g_fire, a);
+  return test_simple1(g_fire, a);
 }
 
 struct th_arg {
@@ -195,7 +196,7 @@ int main(int argc, char** argv) {
   }
 
   box64_signal_stats_enable(1);
-  check_u64(box64_call0(install_sym), 0,
+  check_u64(test_simple0(install_sym), 0,
             "guest rt_sigaction(SIGUSR1) installed (sa_mask=SIGALRM, no NODEFER)");
   if (g_fail) {
     /* Without a working rt_sigaction a fire would never terminate: stop here. */
@@ -210,13 +211,13 @@ int main(int argc, char** argv) {
   probe_once("repeat", 0x600e);
 
   /* 2. nested: fire from a host bridge while an outer guest call is active. */
-  cb = box64_callback((void*)host_cb_fire, "IIIIII");
+  cb = box64_callback((void*)host_cb_fire);
   check(cb != NULL, "nested: callback bridge registered");
   if (cb) {
     uint64_t got, hh;
     mask_block_one(SIGUSR2);
-    got = box64_call2(g_invoke, (uint64_t)(uintptr_t)cb, 0x600f);
-    hh = box64_call0(g_hits);
+    got = test_simple2(g_invoke, (uint64_t)(uintptr_t)cb, 0x600f);
+    hh = test_simple0(g_hits);
     check_u64(got, 0x600f + hh, "nested: resumed across the outer call");
     check(mask_blocked(SIGUSR2), "nested: pre-call bit survived");
     check(!mask_blocked(SIGALRM) && !mask_blocked(SIGUSR1),

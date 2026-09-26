@@ -46,7 +46,7 @@ long g_neg64(long x) { return -x; }
 long g_ptr_long(const long* p) { return *p; }
 
 /* Calls a host-supplied function pointer: the bridge re-enters the engine
- * through box64_call1, which is the reentrancy check. */
+ * through the unified scalar call entry, which is the reentrancy check. */
 long g_invoke(long (*f)(long), long x) { return f(x) + 1; }
 
 /* Recursion: the guest genuinely uses its stack, and the engine must restore
