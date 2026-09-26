@@ -15,58 +15,89 @@ box64 作为程序启动、建立 `my_context` 和线程 emu 之后才可达。l
 box64_lib_init();                                  /* 起运行时 */
 void* h = box64_dlopen("guest.so", RTLD_NOW);      /* 加载 x86_64 .so */
 void* f = box64_dlsym(h, "func");                  /* 取 guest 函数 */
-box64_call_regs(f, gregs, fregs);                  /* 寄存器直通 */
-box64_call_marshaled(f, gregs, fregs, stk, len);   /* 带栈参数 */
-void* cb = box64_callback(host_fn);                /* 宿主函数 → guest 可调地址 */
+box64_call_simple(f, a0, a1, a2, a3, a4, a5, &rax); /* 标量快速路径 */
+box64_call_desc(f, &desc, &out);                  /* 浮点/结构体/栈参数 */
+void* cb = box64_callback(host_fn);               /* 宿主函数 → guest 可调地址 */
 ```
 
-引擎寄存器文件的 ABI 类型与容量常量集中在 `include/libbox64_abi.h`（`libbox64.h` 与
-`DynaCall_abi` seam 共用），`libbox64.h` 自身不依赖 unilib；unilib 的
-`unilib_sigplan` / `unilib_fpr` / `unilib_results` 直接别名到这些类型。
+引擎寄存器文件的 ABI 类型与容量常量集中在 `include/libbox64_abi.h`；`libbox64.h`
+自身不依赖 unilib，生成的 unilib stub 直接使用同一套 descriptor 类型。调用是每线程
+一个 emu、各带独立 guest 栈，`DynaCall` 不加全局锁；全局锁只保护 `dlopen` / `dlsym` /
+bridge 注册这些改动共享结构的操作。
 
-调用是每线程一个 emu、各带独立 guest 栈，`DynaCall` 不加全局锁；全局锁只保护
-`dlopen` / `dlsym` / bridge 注册这些改动共享结构的操作。
+## 标量入口与 descriptor 入口
 
-## 定参入口与编译期计划
-
-上面两个入口每次都完整摆一遍寄存器文件。参数全是指针和整数、而且个数固定时，用下面
-这组更省的入口：
+参数全是整数/指针、最多六个且不需要浮点或栈参数时，使用标量入口。它按 SysV64 的参数
+寄存器顺序接收六个物理槽，未使用的槽传零，并通过独立的 `BOX64_CALL_OK` 状态与 RAX
+输出区分“guest 返回零”和“引擎拒绝”：
 
 ```c
-box64_call0(f);                  /* 只按用到的参数寄存器摆 */
-box64_call1(f, a0);
-/* … 直到 */ box64_call6(f, a0, a1, a2, a3, a4, a5);
+uint64_t rax;
+box64_call_status_t st = box64_call_simple(f, a0, a1, a2, a3, a4, a5, &rax);
 ```
 
-`box64_call0` 到 `box64_call6` 按 SysV64 的参数寄存器顺序对应位置 0 到 5，返回 guest
-的 RAX，只写回 RAX，不写回 RDX 与 XMM。没有浮点和栈参数时它们不写 SSE 组、也不建出栈
-数据块，因此比 `box64_call_regs` 少了无用的寄存器拷贝，比 `box64_call_marshaled` 少了
-空栈块。线程 emu、重入、被调用者保存寄存器与栈指针的处理都由引擎承担，与旧入口一致。
-
-带浮点、嵌套结构体、大结构体按值或 sret 的完整签名走**编译期计划**。生成期就知道一份
-签名用哪些参数寄存器和多少栈字节，于是每个签名发一份静态常量：
+带浮点、嵌套结构体、大结构体按值或 sret，以及需要 guest 栈数据的签名走 descriptor
+入口。descriptor 的掩码点名固定的物理 GPR/SSE 位置，`stack_len` 是栈 blob 的字节数，
+三个地址字段指向本次调用的寄存器文件和栈数据；返回值通过 `box64_call_results_t` 写回：
 
 ```c
-static const box64_sigplan_t plan = BOX64_SIGPLAN(gpr_mask, fpr_mask,
-                                                  ret_mask, stack_len);
+box64_call_desc_t desc = {
+    .flags = BOX64_CALL_FLAG_FORCE_FRAME,
+    .gpr_mask = gpr_mask, .fpr_mask = fpr_mask,
+    .ret_mask = ret_mask, .stack_len = stack_len,
+    .gprs = BOX64_PTR_TO_U64(gprs),
+    .fprs = BOX64_PTR_TO_U64(fprs),
+    .stack = BOX64_PTR_TO_U64(stack),
+};
 box64_call_results_t out;
-box64_call_plan(f, &plan, gprs, fprs, stack, &out);
+box64_call_status_t st = box64_call_desc(f, &desc, &out);
 ```
 
-计划里的四个掩码分别点名参数 GPR 位置、参数 SSE 位置、要写回的返回位置（RAX、RDX、
-XMM0、XMM1）和出栈字节数。**引擎不在运行时解析或归类签名**，它只按掩码读、按掩码写，
-并按下 `stack_len` 拷出栈数据块。`box64_fpr_t` 带一份 SSE 寄存器的完整 16 字节，因为
-一个结构体怎么分到寄存器由 psABI 决定，生成器把结果写进计划，`tests/test_call_plan.c`
-拿 x86_64 编译器当对照。`stack_len` 是 `uint16_t`，生成期必须保证不超过上限。
+**引擎不在运行时解析或归类签名**，只按 descriptor 掩码读写；生成器在编译期完成 ABI
+分类。每个生成 stub 还把 descriptor 的 flags、掩码和长度放进 `static const` 模板，
+调用时只复制该静态部分并改写本次调用的三个指针字段，避免每次清零并逐字段构造 48 字节
+descriptor。`box64_fpr_t` 始终携带一份 SSE 寄存器的完整 16 字节。`stack_len` 是
+`uint32_t`，生成期仍会检查其不会溢出 descriptor 字段。
+
+`flags` 只接受两位：`BOX64_CALL_FLAG_FORCE_FRAME`（`stack_len == 0` 也保留一个锚定
+frame；非零 `stack_len` 本来就锚定）和 `BOX64_CALL_FLAG_FULL_REGS`（走历史通用
+`DynaCall`，正常返回后把调用前的 RDI/RSI/RBX/RBP 额外写回；不设则走 `DynaCall_abi`，
+恰好跳过这组恢复，其余 RSP/RIP/eflags/长跳转规则完全相同，其它寄存器两种模式都不
+恢复）。它是**调用方可见的后置条件**，不是按 ABI 自动优化：需要这四个寄存器跨调用保持
+就设它；只有确认调用后它们已死（例如 SysV64 的 RDI/RSI 返回值不读，或符合 Win64 约定的
+被调方已自行保存其非易失 RDI/RSI）才可清除。不要拿一种 ABI 的 clobber 规则套到另一种：
+Win64 的 RDI/RSI 是 callee-saved 而 RCX/RDX/R8/R9 易失，与 SysV64 相反，见
+`include/libbox64_abi.h`。两位之外的任何 flag、
+非零 `reserved0`/`reserved1`、越界掩码（gpr > 0x3f、fpr > 0xff、ret > 0x0f）以及
+“掩码点名空数组/空栈”都由 `include/libbox64_abi.h` 的公共 `static inline`
+`box64_call_desc_validate()` 统一判定；`box64_call_desc()` 与 winedl 的描述符入口共享
+这一个规则，不各自维护检查表，也不新增第三个执行入口。
 
 诊断开关默认**关闭**。`BOX64DL_DIAG` 只在第一次使用时采样一次，`box64_diag_set()` 可以
 在运行期覆盖它；错误从不走这个开关，始终经 `box64_dlerror()` 报告。相关回归：
 
 ```bash
 make -C libbox64dl test-call-arity   # 定参入口 + 重入回调
-make -C libbox64dl test-call-plan    # 编译期计划与结构体摆放
+make -C libbox64dl test-call-plan    # descriptor 掩码与结构体摆放
 make -C libbox64dl test-call-fini    # box64_lib_fini() 之后的调用被拒绝
 ```
+
+**终止与 ready 契约。** phase 由 Rust 独占（`rust/src/phase.rs`）：
+`UNINIT → INITIALIZING → READY`，`READY → CLOSING → FINAL`，失败走终态 `FAILED`。
+Rust 只导出**短叶**迁移原语（`box64dl_rust_phase_*`：拿锁、改状态、发布、返回），
+编排放到 C（`src/libbox64.c`）：`box64_lib_init` 先 `begin_init` 再在 C 帧里 boot；
+`box64_lib_fini` 先发布 `CLOSING` 再调 box64 自己的 `endBox64()`（guest fini/destructor
+都在 C 帧，Rust 锁与 Rust 帧都不跨 guest）。C 侧还有显式准入计数
+（`engine_admit`/`engine_release`，**不是** Rust RAII 票据，foreign longjmp 不会跳过
+Drop）：有 guest 调用在飞时 `box64_lib_fini()` **拒绝**并发布终态 `FINAL`，
+**不**强 free 活 context，错误槽要求进程退出；此后所有入口（含 cached-emu 快路径）
+先查 phase 再拒绝。`box64_is_ready()` 只读 phase。`FAILED`/`FINAL` 都是终态：此后
+`box64_lib_init()` 被显式拒绝并给出原因，`box64_dlopen()` 干净失败并置错误。
+Rust **不会**自己 free context（`Engine` 没有 freeing `Drop`），所以不可能二次释放；
+init 中途失败走 shim 的单独 free 路径并记 FAILED。`my_context` 是 box64 自己的全局，
+不是状态源。`tests/test_call_fini.c`、`tests/test_fini_race.c` 与
+`tests/consumer_smoke.c` 钉住这条契约；完整所有权/双重释放审计见
+[`docs/engine-ownership.md`](docs/engine-ownership.md)。
 
 ## 从 guest 状态回到 host（Wine detach 安全）
 
@@ -101,7 +132,10 @@ box64_guest_state_t guest;
 if (box64_detach_current_thread_guest(&guest) != 0) return -1;
 
 /* 第 3 步：通过引擎调 Unix 侧的 detach 导出；此时 SP 已不在 Wine 栈内。 */
-int32_t st = (int32_t)box64_call_regs(g.detach_current_thread, eg, ef);
+uint64_t st_rax;
+int32_t st = (int32_t)box64_call_simple(g.detach_current_thread, 0, 0, 0, 0,
+                                         0, 0, &st_rax);
+(void)st_rax;
 if (st != 0) {
   /* unix detach 失败。PE 侧已经跑过就无法还原，restore 只能回滚切栈、补不回
      PE 状态：线程按 spent 处理，不要再 restore/retry。 */
@@ -177,9 +211,11 @@ BOX64_DYNAREC=0 ./your-app # 运行期回退，无需重新构建
 
 ```bash
 make          # 两份都构建
-make pic      # 只构建 PIC（uninode 需要）
-make static   # 只构建静态（unilib 测试需要）
-make cli      # 打包版 box64 CLI（build/bin/box64）
+make pic      # 只构建 PIC（.so / DSO 消费者）
+make static   # 只构建静态（进程内静态链接消费者）
+make shared   # 引擎 DSO + 版本脚本（build/lib/libbox64dl.so）
+make cli      # 打包版 box64 CLI（build/bin/box64，动态链接该 DSO）
+make pkgconfig # 生成 build/lib/pkgconfig/libbox64dl.pc
 make plugins  # 列出已注册插件
 ```
 
@@ -202,10 +238,10 @@ DWARF↔SEH 桥）；系统 box64 走模拟版 `/usr/lib/box64-x86_64-linux-gnu/
 拿到它，而 libgccs 插件选择 wrap 宿主 libgcc，因此符号表里必须带上——补上之前
 wine 在这个引擎下起不来。
 
-## wrapped library 插件
+## wrapped library 插件（本仓 `libgccs`）与显式 native-module seam
 
-guest 需要的、必须由宿主提供的库（典型如 `libnode.so`），用插件形式注册。
-每个 `plugins/<name>/` 提供三个文件：
+guest 需要的、必须由宿主提供、且能在**构建期**命名的库，用 box64 的
+wrapped-library 机制注册。每个 `plugins/<name>/` 提供三个文件：
 
 ```
 wrapped<lib>.c            box64 wrapper 实现（GO/GOM）
@@ -213,15 +249,50 @@ wrapped<lib>_private.h    符号与签名表
 library_list.inc          GO("soname", <lib>) 行
 ```
 
-下游项目把自己的目录软链进 `plugins/` 即完成注册，例如 uninode：
+本仓的 plugin 集是**本仓库内的 `plugins/libgccs`**：`libgcc_s.so.1`
+的 unwinding/quad-math 符号必须由宿主提供。`make graft` 把 plugin 的
+`wrapped*.c` / `wrapped*_private.h` 软链进 vendored 树，并生成
+`library_list_extra.h` 与 `box64dl_plugins.cmake`。
 
-```make
-$(LIBBOX64DL)/plugins/libnode:
-	ln -sfn $(ROOT)/wrapped $@
-```
+**显式 native-module seam（ABI 2，已实现）。** 另一个仓库的 provider（uninode 的
+Node/N-API 宿主面）**不在构建期进入本仓**：provider 在首次 `box64_dlopen()` 之前调用
+`box64_register_native_module(descriptor, BOX64_NATIVE_MODULE_ABI)` 登记一个固定
+descriptor（模块名、guest sonames、`host_library`、bridge 表）。引擎在
+wrapped-library 装载路径上先问 seam；命中时由 `src/native_module_lib.c` 构造运行时
+wrapped library：
 
-`make graft` 会把插件软链进 vendored 树，并生成 `library_list_extra.h` 与
-`box64dl_plugins.cmake`。
+- **普通 entry**（无 `BOX64_BRIDGE_GOM`）：引擎对 `host_library`（NULL = 当前进程）
+  做 `dlsym`，用 entry 的 signature token 对应的 box64 生成 wrapper 桥回 guest；
+- **GOM entry**：provider 提供 handler，引擎用 E-form wrapper 调用
+  `handler(emu, <guest args...>)`，由 handler 自己调宿主并用
+  `box64_call_simple`/`box64_call_desc` + `box64dl_thunk_*` 重写 guest 回调；
+- 引擎没有的 signature、或解析不到的宿主符号，**fail-closed**（符号解析失败，不静默
+  fallback）。
+
+引擎的 signature→wrapper 查表不是第二套 ABI 规则：`src/wrappedbox64dnative_private.h`
+(uninode-agnostic 的 SysV token 列表) 作为 WRAPPEDS 输入交给 box64 自己的
+`rebuild_wrappers.py`，`src/wrappedbox64dnative.c` 用同一份列表建表，实现
+`box64_native_module_wrapper()`。provider 用它做 guest 回调重写的 bridge 地址查询时，
+用公开的 `box64_native_function()`（内部 `GetNativeFnc` 的公开形态）。
+
+因此本仓**既**能 engine-only 独立构建/测试（`check-no-node` 只看当前 graft 与产物，
+`plugins/` 只允许 `libgccs`），**也**能在运行时装载兄弟仓的 provider，而不再需要
+`libbox64dl/plugins/libnode` 软链。描述符布局、注入点与运行时构造见
+`include/libbox64_native_module.h`、`patches/0010-native-module-seam.patch` 与
+`src/native_module_lib.c`。
+
+**Node 反向依赖仍然被禁。** 本仓不包含、不编译、不软链任何 Node/uninode/libnode
+源：`tools/check_no_node.sh` 在构建输入层面断言这一点（活动 graft/provider 无 libnode：
+`plugins/libnode` 不存在、无活跃 symlink 指向 uninode；plugin 集只有 `libgccs`、
+生成的 cmake/list 无 Node 名、Makefile 不引用兄弟仓库、源码不 include Node/uv 头；
+vendored 树里 upstream 自带的 generated 头与旧 build cache 不属于当前 graft，不判失败）。`make graft` 只把 `VENDOR_SRC` 列出的 C/asm 软链进
+vendored 树；`src/core_shim.c` 与 `src/pt_mutex/*` 由 Rust crate 的 build script
+编译，**不**进 engine archive。seam 的引擎侧源（`src/native_module*.c`、
+`src/wrappedbox64dnative*`）只含 SysV signature token，不含任何 Node 符号。
+
+`plugins.conf` / `PLUGIN_CONFIG` / `make plugin-manifest` / `make check-plugins` 仍
+可用于显式固定 graft 的目录集合（只锁位置，不是版本锁）；`plugins.conf.example`
+保留了这一机制的说明。
 
 ## 信号掩码策略（库级）
 
@@ -272,18 +343,33 @@ BOX64DL_SIGNAL_LIBRARY_RULES='libspecial.so=compat' \
 
 ## 对 vendored box64 的改动面
 
-`third_party/box64` 只有两行手改，其余全部是软链或生成物，所以这棵树能直接和上游同步：
+`third_party/box64` 只有两行手改加一处 patch 注入点，其余全部是软链或生成物，所以这棵树能直接和上游同步：
 
 1. `src/library_list.h` 末尾 `#include "library_list_extra.h"`
 2. `CMakeLists.txt` 里 `include("${BOX64_ROOT}/box64dl_plugins.cmake" OPTIONAL)`
+3. `patches/0010-native-module-seam.patch`：`src/librarian/library.c` 加一行 include，
+   把 `initWrappedLib()` 改成三态返回（0=不是我们的 soname，>0=已构建，<0=被
+   descriptor 认领但构建失败），并在它的两个调用点处理失败：认领后失败必须
+   中止本次加载（不落到 emulated 路径、不加载同名 x86_64 客体、不留半初始化
+   LIB_WRAPPED），让 `box64_dlopen()` 返回 NULL。seam 逻辑全在引擎自己的
+   `src/native_module_lib.c`）
 
 外加 `CMakeLists.txt` 里的 `libbox64` STATIC target 与 `src/libbox64.c` 一行源文件登记。
 
-## 嵌入时的两个坑
+## 嵌入时的三个坑
 
 - `NewBox64Context` 把 `box64lib` 设为 `dlopen(NULL)`。作为程序时那就是 box64 自己，
   GOM 的 `my_*` 符号都在里面；嵌进宿主后 `dlopen(NULL)` 变成宿主可执行文件，
   `my_*` 却在我们这个 DSO 里。`box64_lib_init` 用 `dladdr` 把 `box64lib` 重绑到自身模块。
+- vendor 的 `librarian/library.c` 用 `dlsym(my_context->box64lib, "my_"+name)` 解析
+  wrapped libc；对一个 dlopen 句柄做 dlsym 只看该模块的**动态**符号表。所以
+  `src/libbox64dl.map` 必须把内部 `my*` 表（`my_`/`my2_`/`my32_`/各 altmy 前缀，
+  约 2200 个 wrapper 符号）设为 global，同时把 Rust 运行时与私有
+  `box64dl_core_*` shim 保持 local。只导出 `box64_*` 会让所有 DT_NEEDED libc guest
+  的 `printf`/`fopen`/`bsearch` 解析失败。`tests/consumer_dso_guest.c` 用**只链最终
+  DSO** 的 consumer 加载真实带 libc DT_NEEDED 的 guest 并观察
+  printf/fopen/bsearch/destructor；`tools/check_exports.py` 分别校验公共 ABI 与内部
+  wrapper 两类动态符号。
 - `core.c` 引用 `unittest()`，嵌入时不链接 `test.c`，由 `libbox64.c` 提供 stub。
 
 ## 许可证
@@ -291,5 +377,7 @@ BOX64DL_SIGNAL_LIBRARY_RULES='libspecial.so=compat' \
 MIT，见 [`LICENSE`](LICENSE)。
 
 `third_party/box64/` 是 [box64](https://github.com/ptitSeb/box64) 的 vendored 副本，
-同为 MIT，版权归 ptitSeb（见该目录下的 `LICENSE`）。本仓库对它的改动只有两行 hook，
-其余是软链与生成物。
+同为 MIT，版权归 ptitSeb（见该目录下的 `LICENSE`）。本仓库对它的本地改动是
+`patches/0001`–`0009` 的编号补丁；除此之外只有 vendored 树里本就跟踪的两行 include
+hook 与 graft 生成物/软链。来源、快照 commit 与"未捏造上游 SHA"的说明见
+[`docs/vendor-provenance.md`](docs/vendor-provenance.md)。
