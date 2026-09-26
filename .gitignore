@@ -33,6 +33,23 @@ third_party/box64/box64dl_core.cmake
 third_party/box64/box64dl_plugins.cmake
 third_party/box64/.libbox64dl_patches_stamp
 
+# Grafted by `make graft` too, through the explicit `ln -sfn` calls in the
+# graft recipe rather than the $(VENDOR_SRC) loop: the engine seam's header,
+# the native-module helper and the engine-owned signature module. Absolute
+# symlinks into $(ROOT)/src (or $(ROOT)/include), never committed.
+third_party/box64/src/core_shim.h
+third_party/box64/src/native_module_lib.c
+third_party/box64/src/native_module_lib.h
+third_party/box64/src/wrappedbox64dnative.c
+third_party/box64/src/wrappedbox64dnative_private.h
+
+# `make patch` calls GNU patch without --no-backup-if-mismatch, so a hunk that
+# applies at an offset leaves patch(1)'s pre-image behind. Patch 0006 lands on
+# src/libtools/signals.c after 0003/0005 shifted its line numbers, hence this
+# file. Build residue, not a source; the pattern names exactly this path so a
+# genuinely new stray backup is still reported by git status.
+third_party/box64/src/libtools/signals.c.orig
+
 # Local state: clangd index cache and build stamps
 BUILD_OK
 third_party/box64/.cache/
