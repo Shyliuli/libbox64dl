@@ -192,8 +192,8 @@ unilib 和 uninode 都建立在这个原语上：前者用它做 `dlsym` 的 hos
 
 | 目录 | 用途 |
 | --- | --- |
-| `third_party/box64/build/libbox64.a` | 宿主可执行文件 |
-| `third_party/box64/build-pic/libbox64.a` | `.so` / `.node` 消费者 |
+| `vendor/box64/build/libbox64.a` | 宿主可执行文件 |
+| `vendor/box64/build-pic/libbox64.a` | `.so` / `.node` 消费者 |
 
 两份都开 dynarec。曾经认为 PIC 那份必须关掉，理由是 LoongArch dynarec 会发 TLS_LE
 重定位、共享对象里放不下——实际上 TLS_LE 只在按默认的**非 PIC** 方式构建 box64 时才
@@ -343,18 +343,40 @@ BOX64DL_SIGNAL_LIBRARY_RULES='libspecial.so=compat' \
 
 ## 对 vendored box64 的改动面
 
-`third_party/box64` 只有两行手改加一处 patch 注入点，其余全部是软链或生成物，所以这棵树能直接和上游同步：
+引擎是**上游** box64 仓库的 git submodule `vendor/box64`，锁在 tag `v0.4.2`
+（commit `7eeb5016493dab4e143d53da50dd47bfb44a9509`）。本仓不在 submodule 里提交任何
+东西：`make patch` 把 `patches/0001`–`0018` 按序打进它的工作树，`make graft` 再把本仓
+的源软链进去，构建落在 `vendor/box64/build{,-pic}`。所以 submodule 工作树**预期是脏的**
+（`.gitmodules` 用 `ignore = untracked` 只隐藏它的 build/graft/生成物，指针本身仍可见）。
 
-1. `src/library_list.h` 末尾 `#include "library_list_extra.h"`
-2. `CMakeLists.txt` 里 `include("${BOX64_ROOT}/box64dl_plugins.cmake" OPTIONAL)`
-3. `patches/0010-native-module-seam.patch`：`src/librarian/library.c` 加一行 include，
+队列里与嵌入直接相关的改动：
+
+1. `0012`：`src/library_list.h` 末尾 `#include "library_list_extra.h"`
+2. `0011`：`CMakeLists.txt` 里 `include("${BOX64_ROOT}/box64dl_core.cmake" OPTIONAL)`
+   与 `include("${BOX64_ROOT}/box64dl_plugins.cmake" OPTIONAL)`
+3. `0010`：`src/librarian/library.c` 加一行 include，
    把 `initWrappedLib()` 改成三态返回（0=不是我们的 soname，>0=已构建，<0=被
    descriptor 认领但构建失败），并在它的两个调用点处理失败：认领后失败必须
    中止本次加载（不落到 emulated 路径、不加载同名 x86_64 客体、不留半初始化
    LIB_WRAPPED），让 `box64_dlopen()` 返回 NULL。seam 逻辑全在引擎自己的
-   `src/native_module_lib.c`）
+   `src/native_module_lib.c`
 
-外加 `CMakeLists.txt` 里的 `libbox64` STATIC target 与 `src/libbox64.c` 一行源文件登记。
+`0011` 还包含 `libbox64` STATIC target、`main.c`/`test.c` 的 `BOX64_MAIN_SRC` 拆分与
+`-rdynamic`；`0013`–`0018` 是上一版 `third_party/box64` 里以手改形式存在、无法从干净
+上游重建的行为差异（x87 tag word/FXSAVE、LA64 FSQRT 标志与未对齐 16 位原子、LinkNext
+帧标记、printer 签名、解释器 FSQRT、include 可移植性）。每条的动机见 patch 头。
+
+验证整条链（submodule commit、patch 哈希、干净上游可应用、工作树无漂移）：
+
+```bash
+tools/verify_box64_patch.sh --check
+```
+
+未纳入队列的旧本地差异（从未定义的 `WINE_BOX64CPU_*` 开关、`_WIN32` 分支、CMake 不编译
+的两个 Wine `src/os` 文件、`wine_step/`、`Makefile.in`、`#if 0` 调试块、由
+`rebuild_wrappers.py` 重新生成的 wrapper 头）逐条列在
+[`patches/README.md`](patches/README.md)；迁移审计见
+[`docs/vendor-provenance.md`](docs/vendor-provenance.md)。
 
 ## 嵌入时的三个坑
 
@@ -376,8 +398,10 @@ BOX64DL_SIGNAL_LIBRARY_RULES='libspecial.so=compat' \
 
 MIT，见 [`LICENSE`](LICENSE)。
 
-`third_party/box64/` 是 [box64](https://github.com/ptitSeb/box64) 的 vendored 副本，
-同为 MIT，版权归 ptitSeb（见该目录下的 `LICENSE`）。本仓库对它的本地改动是
-`patches/0001`–`0009` 的编号补丁；除此之外只有 vendored 树里本就跟踪的两行 include
-hook 与 graft 生成物/软链。来源、快照 commit 与"未捏造上游 SHA"的说明见
-[`docs/vendor-provenance.md`](docs/vendor-provenance.md)。
+`vendor/box64/` 是 [box64](https://github.com/ptitSeb/box64) 的上游 git submodule
+（tag `v0.4.2`，commit `7eeb5016493dab4e143d53da50dd47bfb44a9509`），同为 MIT，版权归
+ptitSeb（见该目录下的 `LICENSE`）。本仓库对它的本地改动是 `patches/0001`–`0018` 的编号
+补丁；除此之外只有 submodule 工作树里的 graft 软链、生成物与构建目录，都不提交。来源、
+上游 commit、队列明细与"哪些旧本地差异被判定为不可达"的审计见
+[`docs/vendor-provenance.md`](docs/vendor-provenance.md) 与
+[`patches/README.md`](patches/README.md)。

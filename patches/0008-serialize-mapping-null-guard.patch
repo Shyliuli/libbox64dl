@@ -8,7 +8,7 @@
 # perfectly valid shutdown. Guard the loop; behaviour with mappings present is
 # unchanged.
 #
-# Vendor-only change, kept here so third_party/box64 stays re-syncable; the
+# Vendor-only change, kept here so vendor/box64 stays re-syncable; the
 # Makefile patch target applies it.
 
 --- a/src/tools/env.c

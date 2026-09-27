@@ -30,10 +30,10 @@
 #
 # The seam logic itself is an engine source (src/native_module_lib.c), grafted
 # like every other ELFLOADER source, so this vendor patch stays the include, the
-# initWrappedLib() return type and its two call sites, and third_party/box64
+# initWrappedLib() return type and its two call sites, and vendor/box64
 # remains re-syncable.
 #
-# Vendor-only change, kept here so third_party/box64 stays re-syncable; the
+# Vendor-only change, kept here so vendor/box64 stays re-syncable; the
 # Makefile patch target applies it.
 
 --- a/src/librarian/library.c

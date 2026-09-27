@@ -13,10 +13,10 @@ crate-type = ["rlib", "staticlib"]
 
 [features]
 default = ["link-box64"]
-# Link against ../third_party/box64/build/libbox64.a (and friends).
+# Link against ../vendor/box64/build/libbox64.a (and friends).
 # Disable to type-check the Rust side alone: `cargo check --no-default-features`.
 link-box64 = []
-# Build against ../third_party/box64/build-pic (PIC) instead of build/ (static).
+# Build against ../vendor/box64/build-pic (PIC) instead of build/ (static).
 pic = []
 
 [dependencies]

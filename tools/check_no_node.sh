@@ -23,7 +23,7 @@
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-box="$root/third_party/box64"
+box="$root/vendor/box64"
 dso="$root/build/lib/libbox64dl.so"
 fail=0
 
@@ -55,7 +55,7 @@ EOF
 #     (upstream generated headers, old build cache, dangling graft symlinks)
 #     are stale state, not the active graft.
 stale=$(find "$box" -name '*libnode*' 2>/dev/null | wc -l)
-[ "$stale" -eq 0 ] || echo "check-no-node: note: $stale stale *libnode* artifact(s) under third_party/box64 are not the active graft"
+[ "$stale" -eq 0 ] || echo "check-no-node: note: $stale stale *libnode* artifact(s) under vendor/box64 are not the active graft"
 
 # 2. The generated build inputs are REQUIRED. Absent means the build was not
 #    run for this check; skipping them would fake a PASS. Present ones are the

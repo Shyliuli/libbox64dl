@@ -31,8 +31,8 @@ done
   exit 1
 }
 
-engine="$root/third_party/box64/build/libbox64.a"
-dynarec="$root/third_party/box64/build/libdynarec.a"
+engine="$root/vendor/box64/build/libbox64.a"
+dynarec="$root/vendor/box64/build/libdynarec.a"
 rust="$root/rust/target/static/debug/liblibbox64.a"
 for f in "$engine" "$dynarec" "$rust"; do
   [ -f "$f" ] || { echo "bridge-seam-spike: FAIL: missing $f (run 'make static' and 'make rust-static')" >&2; exit 1; }
@@ -44,7 +44,7 @@ mkdir -p "$(dirname "$out")"
 set -- \
   -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
   -I"$root/include" -I"$provider" -I"$provider_wrapped" \
-  -I"$root/third_party/box64/src/include" -I"$root/third_party/box64/src" \
+  -I"$root/vendor/box64/src/include" -I"$root/vendor/box64/src" \
   -o "$out" "$root/tests/bridge_seam_spike_main.c" \
   "$root/tests/bridge_seam_spike_engine.c" \
   "$provider/uninode_native_module.c" "$provider_wrapped/wrappedlibnode.c" \

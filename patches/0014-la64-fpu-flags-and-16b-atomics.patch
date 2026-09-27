@@ -1,0 +1,75 @@
+# libbox64dl patch 0014 (correctness): LA64 dynarec FSQRT flags and unaligned
+# 16-bit atomics.
+#
+# Two host-architecture defects in the LA64 dynarec:
+#
+#  * dynarec_la64_d9.c, FSQRT: the interpreter and the native FSQRT set no x87
+#    status flag, but x86 sets C0 when the source is negative (and C2/C3 stay
+#    clear). Guests that branch on C0 after FSQRT (Wine's fp code, some CRT
+#    math) see a stale flag. The emitted code now compares ST0 against zero and
+#    ORs the compare result into the status word.
+#  * dynarec_la64_66f0.c, LOCK XADD/CMPXCHG on a 16-bit memory operand: the
+#    generated AMADD_DB_H path is only single-copy atomic when the address is
+#    aligned. When !ALIGNED_ATOMICH the code now falls back to a
+#    context->mutex_16b guarded load-add-store, which is atomic across host
+#    threads even for a misaligned guest operand.
+#
+# Vendor-only change, kept here so vendor/box64 stays re-syncable; the Makefile
+# patch target applies it.
+
+--- a/src/dynarec/la64/dynarec_la64_66f0.c
++++ b/src/dynarec/la64/dynarec_la64_66f0.c
+@@ -414,6 +414,11 @@ uintptr_t dynarec64_66F0(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int
+                             u64 = (uint16_t)(int16_t)F8S;
+                         MOV64x(x5, u64);
+ 
++                        if (!ALIGNED_ATOMICH) {
++                            ANDI(x3, wback, 1);
++                            j64 = GETMARKF - dyn->native_size;
++                            BNEZ(x3, j64);
++                        }
+                         if (cpuext.lam_bh) {
+                             AMADD_DB_H(x1, x5, wback);
+                         } else {
+@@ -439,6 +444,20 @@ uintptr_t dynarec64_66F0(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int
+                             BSTRINS_D(x3, x4, 31, 15);
+                             SC_W(x3, wback, 0);
+                             BEQZ_MARK2(x3);
++                        }
++                        if (!ALIGNED_ATOMICH) {
++                            B_MARK3_nocond;
++                            MARKF;
++                            LD_D(x6, xEmu, offsetof(x64emu_t, context));
++                            ADDI_D(x6, x6, offsetof(box64context_t, mutex_16b));
++                            ADDI_D(x7, xZR, 1);
++                            MARKLOCK2;
++                            AMSWAP_DB_W(x3, x7, x6);
++                            BNEZ_MARKLOCK2(x3);
++                            LD_HU(x1, wback, 0);
++                            ADD_D(x4, x1, x5);
++                            ST_H(x4, wback, 0);
++                            AMSWAP_DB_W(xZR, xZR, x6);
+                             MARK3;
+                         }
+                         // final
+--- a/src/dynarec/la64/dynarec_la64_d9.c
++++ b/src/dynarec/la64/dynarec_la64_d9.c
+@@ -340,6 +340,18 @@ uintptr_t dynarec64_D9(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
+             case 0xFA:
+                 INST_NAME("FSQRT");
+                 v1 = x87_get_st(dyn, ninst, x1, x2, 0, X87_ST0);
++                v2 = fpu_get_scratch(dyn);
++                if (ST_IS_F(0)) {
++                    MOVGR2FR_W(v2, xZR);
++                    FCMP_S(fcc0, v1, v2, cLT);
++                } else {
++                    MOVGR2FR_D(v2, xZR);
++                    FCMP_D(fcc0, v1, v2, cLT);
++                }
++                MOVCF2GR(x1, fcc0);
++                LD_HU(x2, xEmu, offsetof(x64emu_t, sw));
++                OR(x1, x1, x2);
++                ST_H(x1, xEmu, offsetof(x64emu_t, sw));
+                 if (!BOX64ENV(dynarec_fastround)) u8 = x87_setround(dyn, ninst, x1, x2);
+                 if (ST_IS_F(0)) {
+                     FSQRT_S(v1, v1);

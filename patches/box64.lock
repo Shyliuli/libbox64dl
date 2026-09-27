@@ -1,0 +1,27 @@
+# vendor/box64 version lock — UPSTREAM SUBMODULE + LOCAL PATCH QUEUE.
+# Regenerate with: tools/verify_box64_patch.sh --write
+# Verify with:     tools/verify_box64_patch.sh --check
+kind = upstream-submodule-patches
+generated_utc = 2026-09-27T03:25:38Z
+upstream_remote = https://github.com/ptitSeb/box64.git
+upstream_tag = v0.4.2
+box64_commit = 7eeb5016493dab4e143d53da50dd47bfb44a9509
+patch_count = 18
+patch.1 = 0001-export-openFTrace.patch f5d68fee31063164414964abd827af157253f411c57f5545aac9894184496b7d
+patch.2 = 0002-silent-log-default-unless-env.patch 2ac9e2df10b2c169e2d6ac6e6315de35bb4f6a36854c027b1012a3a91a97a756
+patch.3 = 0003-signal-host-route.patch c664a72c7af02802d079e305df46f008166c3410a4392609dd65e9b62348453c
+patch.4 = 0004-known-abi-dynacall.patch e1e478874ed00c9ee59329f455e54705d4c3af691bbb487c3147dd918d2c9af5
+patch.5 = 0005-signal-jmpbuf-policy.patch 82cb88f7fbeb21bad7f5a4617b5b0cae687a96cd870c67344eab7563969fd07c
+patch.6 = 0006-fini-restore-host-actions.patch bd4275f29b4b81ce0614b382a83164b4852788843c0d295aef26eca9200d749f
+patch.7 = 0007-bridge-dedup-key.patch 2633682fc1736f0846a37bfbefea4db9ee46bc08028285a5ad558a0c2fcb1e76
+patch.8 = 0008-serialize-mapping-null-guard.patch 22b656309514df0d6209bc562579492aa11e780f0073926c94ee93cdceca9f85
+patch.9 = 0009-embedded-endbox64-empty-context.patch 442deb7067b0d5b5b43dd98f04b64c3501ee7935a7ff7925ee282d2cee1d6cbf
+patch.10 = 0010-native-module-seam.patch 321195e26ea951e7e30fe8ebed93126e210d2dd5d3fed8e9146439c84b234e74
+patch.11 = 0011-embed-libbox64-static-target.patch 44b8baf2fc8b84429486536747c5c5167cc68a17f8fe701c70cd75eaa5dbaf15
+patch.12 = 0012-plugin-library-list-hook.patch dbca75559a5d70b1b06ac2d31d9908466de120e715f0c6c45c58b6f4d6504d0f
+patch.13 = 0013-x87-tagword-fxsave-fidelity.patch e9d019515cbf1ddf09e88bb19eeb5efdf015ff6cb83b6528219208fc68c2947b
+patch.14 = 0014-la64-fpu-flags-and-16b-atomics.patch c8b1700bc17395fa7357e915a818588024fb35ce676b7119ea45146d988ab36e
+patch.15 = 0015-la64-next-linker-frame-sentinel.patch e8a92a9d37a46cb48385172abf709876810418ad9736e3cadb02e7349dabbbc4
+patch.16 = 0016-printer-plugin-signatures.patch 1d32eea3e806fc05daf08f81697434d1dfd9bce2a3385bc027bb0ddf5b2eb05d
+patch.17 = 0017-interpreter-fpu-exception-flags.patch 85c356c3433bbbd7f889dd1d0185eba425f3c93c5177df21b996be5d33172b70
+patch.18 = 0018-compile-portability-includes.patch 247b6b786268b2cb72e27247c3a8f4c3bc1682ef3669b426d671af7f08de7e80

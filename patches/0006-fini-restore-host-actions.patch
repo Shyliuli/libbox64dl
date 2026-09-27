@@ -20,7 +20,7 @@
 # calling thread's process dispositions and the saved structs are
 # process-lifetime globals (valid even as the context is freed).
 #
-# Vendor-only change, kept here so third_party/box64 stays re-syncable; the
+# Vendor-only change, kept here so vendor/box64 stays re-syncable; the
 # Makefile patch target applies it (after patch 0005; different files/hunks).
 
 --- a/src/box64context.c

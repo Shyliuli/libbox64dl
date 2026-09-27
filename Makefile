@@ -1,16 +1,26 @@
 # libbox64dl — box64 as an embeddable library for loading x86_64 shared objects.
 #
+# The engine is the upstream box64 Submodule at vendor/box64, pinned to v0.4.2
+# (commit 7eeb5016493dab4e143d53da50dd47bfb44a9509) by the gitlink in
+# .gitmodules. `make patch` applies patches/ into that checkout; `make graft`
+# links this repository's sources into it. Nothing under vendor/box64 is
+# hand-edited in git: the submodule worktree is expected to be dirty.
+#
 # Two flavours are built from one vendored tree:
 #   build/      static, dynarec allowed — for host executables (unilib tests)
 #   build-pic/  -fPIC, interpreter only — for .so consumers (embedded engine)
 
 ROOT := $(abspath .)
-BOX64 := $(ROOT)/third_party/box64
+BOX64 := $(ROOT)/vendor/box64
+# The pinned upstream commit. `make check-vendor` compares it with the
+# submodule's HEAD so a moved or uninitialised submodule fails loudly instead of
+# building a different engine than the patch queue was written for.
+BOX64_REF := 7eeb5016493dab4e143d53da50dd47bfb44a9509
 BUILD_STATIC := $(BOX64)/build
 BUILD_PIC := $(BOX64)/build-pic
 NPROC := $(shell nproc)
 
-# Ordered patches against the vendored tree (see patches/).
+# Ordered patches against the pristine submodule checkout (see patches/).
 PATCHES := $(sort $(wildcard $(ROOT)/patches/*.patch))
 PATCH_STAMP := $(BOX64)/.libbox64dl_patches_stamp
 
@@ -87,7 +97,7 @@ CMAKE_PIC := $(CMAKE_COMMON) -DLARCH64_DYNAREC=$(PIC_DYNAREC) \
 	-DCMAKE_C_FLAGS="-fPIC -ftls-model=global-dynamic" \
 	-DCMAKE_ASM_FLAGS="-fPIC"
 
-.PHONY: all static pic patch unpatch graft prune-stale-grafts plugins plugin-manifest check-plugins check-exports check-exports-negative test test-all test-detach-guest test-reset-stack test-call-arity test-call-plan test-call-fini test-call-unified bench-call-arity test-signal-policy test-signal-route test-guest-signal test-signal-library bench-signal-policy clean distclean rust rust-static \
+.PHONY: all static pic patch unpatch vendor check-vendor check-vendor-patches graft prune-stale-grafts plugins plugin-manifest check-plugins check-exports check-exports-negative test test-all test-detach-guest test-reset-stack test-call-arity test-call-plan test-call-fini test-call-unified bench-call-arity test-signal-policy test-signal-route test-guest-signal test-signal-library bench-signal-policy clean distclean rust rust-static \
 	rust-pic cli check-consumer-dso-guest test-fini-races \
 	check-bridge-registration check-bridge-registration-unit bridge-seam-spike
 
@@ -668,8 +678,39 @@ build/test_thunk: tests/test_thunk.c tests/test_thunk_shim.S src/thunk.c src/thu
 static: $(BUILD_STATIC)/libbox64.a
 pic: $(BUILD_PIC)/libbox64.a
 
-# Apply patches/ to third_party/box64 (idempotent). First build step.
-patch: $(PATCH_STAMP)
+# Materialise the engine submodule. Needs network on a fresh clone; a machine
+# that already has .git/modules/vendor/box64 just checks out the pinned commit.
+#
+# On a network-less machine, point the public URL at a local mirror:
+#   make vendor BOX64_GIT_OPTS='-c protocol.file.allow=always \
+#     -c url."/path/to/box64".insteadOf=https://github.com/ptitSeb/box64.git'
+BOX64_GIT_OPTS ?=
+vendor:
+	git -C "$(ROOT)" $(BOX64_GIT_OPTS) submodule update --init --recursive vendor/box64
+
+# Fail before patching/building when the engine submodule is missing or is not
+# the pinned commit. A wrong engine would otherwise surface as a patch that
+# "cannot apply" or a compiler error far from the real cause.
+check-vendor:
+	@test -f "$(BOX64)/CMakeLists.txt" \
+		|| { echo "check-vendor: $(BOX64) is empty; run 'make vendor' (git submodule update --init vendor/box64)" >&2; exit 1; }
+	@cur=$$(git -C "$(BOX64)" rev-parse HEAD 2>/dev/null); \
+	if [ "$$cur" != "$(BOX64_REF)" ]; then \
+		echo "check-vendor: vendor/box64 HEAD=$$cur, expected $(BOX64_REF) (upstream v0.4.2)" >&2; \
+		echo "check-vendor: run 'make vendor' or check out $(BOX64_REF) in vendor/box64" >&2; \
+		exit 1; \
+	fi
+
+# Post-patch audit: submodule commit, patch sha256s, pristine-upstream apply and
+# worktree drift, all in tools/verify_box64_patch.sh. Run after `make patch` (or
+# `make graft`); `--write` re-cuts patches/box64.lock after a deliberate edit.
+check-vendor-patches:
+	tools/verify_box64_patch.sh --check
+
+# Apply patches/ to vendor/box64 (idempotent). First build step. -N tolerates a
+# queue that is already applied; --no-backup-if-mismatch keeps patch(1)'s
+# pre-images (.orig) out of the submodule when a hunk lands at an offset.
+patch: check-vendor $(PATCH_STAMP)
 
 $(PATCH_STAMP): $(PATCHES)
 	@set -e; \
@@ -681,9 +722,9 @@ $(PATCH_STAMP): $(PATCHES)
 	cd "$(BOX64)"; \
 	for p in $(PATCHES); do \
 		echo "patch: $$(basename "$$p")"; \
-		if patch -p1 -N --dry-run -i "$$p" >/dev/null 2>&1; then \
-			patch -p1 -N -i "$$p"; \
-		elif patch -p1 -R --dry-run -i "$$p" >/dev/null 2>&1; then \
+		if patch -p1 -N --no-backup-if-mismatch --dry-run -i "$$p" >/dev/null 2>&1; then \
+			patch -p1 -N --no-backup-if-mismatch -i "$$p"; \
+		elif patch -p1 -R --no-backup-if-mismatch --dry-run -i "$$p" >/dev/null 2>&1; then \
 			echo "  (already applied)"; \
 		else \
 			echo "error: cannot apply $$p" >&2; \
@@ -702,9 +743,9 @@ unpatch:
 	cd "$(BOX64)"; \
 	for p in $$(printf '%s\n' $(PATCHES) | sort -r); do \
 		echo "unpatch: $$(basename "$$p")"; \
-		if patch -p1 -R --dry-run -i "$$p" >/dev/null 2>&1; then \
-			patch -p1 -R -i "$$p"; \
-		elif patch -p1 -N --dry-run -i "$$p" >/dev/null 2>&1; then \
+		if patch -p1 -R --no-backup-if-mismatch --dry-run -i "$$p" >/dev/null 2>&1; then \
+			patch -p1 -R --no-backup-if-mismatch -i "$$p"; \
+		elif patch -p1 -N --no-backup-if-mismatch --dry-run -i "$$p" >/dev/null 2>&1; then \
 			echo "  (not applied)"; \
 		else \
 			echo "  (not applied: base absent)"; \
@@ -749,9 +790,9 @@ prune-stale-grafts:
 		unlink "$$l"; \
 	done
 
-# Graft our sources into the vendored tree. Everything here is a symlink or a
-# generated file, so third_party/box64 stays re-syncable with upstream; the only
-# hand-edits there are the two hook lines in library_list.h and CMakeLists.txt.
+# Graft our sources into the vendored submodule. Everything here is a symlink or
+# a generated file, so vendor/box64 stays re-checkoutable; the only hand-edits
+# are the hook lines patches/ delivers (library_list.h, CMakeLists.txt).
 # Patches under patches/ are applied first via the `patch` target.
 #
 # Fixed-arity call entries are implemented directly in src/libbox64.c as thin

@@ -7,7 +7,7 @@
 # segfaulted. Guard both with a NULL check; standalone box64 always has a
 # main ELF, so its behaviour is unchanged.
 #
-# Vendor-only change, kept here so third_party/box64 stays re-syncable; the
+# Vendor-only change, kept here so vendor/box64 stays re-syncable; the
 # Makefile patch target applies it.
 
 --- a/src/core.c

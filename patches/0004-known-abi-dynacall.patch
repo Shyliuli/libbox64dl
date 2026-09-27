@@ -13,7 +13,7 @@
 # RSP/RIP/eflags/deferred flags and the longjmp rule are identical in both
 # modes.
 #
-# Vendor-only change, kept here so third_party/box64 stays re-syncable; the
+# Vendor-only change, kept here so vendor/box64 stays re-syncable; the
 # Makefile `patch` target applies it.
 
 --- a/src/include/box64cpu.h

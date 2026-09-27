@@ -1,0 +1,45 @@
+# libbox64dl patch 0018 (portability): three include fixes from the local tree.
+#
+#  * src/include/signals.h includes mysignal.h, so every signals.h consumer gets
+#    the same <signal.h> / siginfo_t visibility the local tree was built with;
+#  * src/dynarec/dynablock.c includes mysignal.h for the same reason;
+#  * src/tools/rbtree.c includes <sys/types.h>, which the local tree relies on
+#    for the address/offset types used by the env mapping tree.
+#
+# On the LA64 Linux build the first two are effectively no-ops (mysignal.h only
+# wraps <signal.h> there) and the third fixes the include of a type used
+# unconditionally; all three are compiled sources, so they are reproduced here.
+#
+# Vendor-only change, kept here so vendor/box64 stays re-syncable; the Makefile
+# patch target applies it.
+
+--- a/src/dynarec/dynablock.c
++++ b/src/dynarec/dynablock.c
+@@ -10,6 +10,7 @@
+ #include "emu/x64emu_private.h"
+ #include "x64emu.h"
+ #include "box64stack.h"
++#include "mysignal.h"
+ #include "callback.h"
+ #include "emu/x64run_private.h"
+ #include "x64trace.h"
+--- a/src/include/signals.h
++++ b/src/include/signals.h
+@@ -4,6 +4,7 @@
+ 
+ #include "x64_signals.h"
+ #include "box64context.h"
++#include "mysignal.h"
+ 
+ typedef void (*sighandler_t)(int);
+ 
+--- a/src/tools/rbtree.c
++++ b/src/tools/rbtree.c
+@@ -3,6 +3,7 @@
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <inttypes.h>
++#include <sys/types.h>
+ 
+ #ifdef RBTREE_TEST
+ #define rbtreeMalloc malloc

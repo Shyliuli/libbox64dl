@@ -5,7 +5,7 @@ use std::process::Command;
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = manifest.parent().unwrap().to_path_buf();
-    let box64 = root.join("third_party/box64");
+    let box64 = root.join("vendor/box64");
 
     // Flavor: executables link the non-PIC build/, .so consumers need the PIC
     // build-pic/. Selected by feature or by LIBBOX64_FLAVOR (make rust-pic).

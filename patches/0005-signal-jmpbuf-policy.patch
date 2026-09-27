@@ -34,7 +34,7 @@
 #
 # Default is FAST. `none` is parsed only in order to be refused: dynarec's
 # protectDB/auto-SMC and guest fatal-signal/SEH emulation depend on the four
-# handlers. Vendor-only change, kept here so third_party/box64 stays
+# handlers. Vendor-only change, kept here so vendor/box64 stays
 # re-syncable; the Makefile patch target applies it.
 --- a/src/emu/x64emu_private.h
 +++ b/src/emu/x64emu_private.h

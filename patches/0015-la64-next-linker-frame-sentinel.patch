@@ -1,0 +1,94 @@
+# libbox64dl patch 0015 (correctness): mark the live LinkNext frame on the host
+# stack.
+#
+# la64_next / la64_next_invalid build a partial register-save frame on the host
+# stack around the call into LinkNext/LinkNextInvalid. A signal delivered while
+# that frame is live (host-context fault routing, patch 0003/0005) must be able
+# to tell "this thread is inside the linker" from a stale saved register block,
+# and unwind accordingly. The frame is now one slot larger and carries a
+# sentinel: slot 96 points at the entry (la64_next / la64_next_invalid) and slot
+# 104 at the frame itself, both cleared before the routine returns.
+#
+# Vendor-only change, kept here so vendor/box64 stays re-syncable; the Makefile
+# patch target applies it.
+
+--- a/src/dynarec/la64/la64_next.S
++++ b/src/dynarec/la64/la64_next.S
+@@ -20,7 +20,7 @@
+ la64_next:
+     // move emu to a0
+     // move IP address to a1
+-    addi.d $sp, $sp, -(8 * 11)
++    addi.d $sp, $sp, -(8 * 12)
+     st.d   RDI, $sp, 0
+     st.d   RSI, $sp, 8
+     st.d   RDX, $sp, 16
+@@ -32,6 +32,11 @@ la64_next:
+     st.d   RSP, $sp, 64
+     st.d   RBP, $sp, 72
+     st.d   RIP, $sp, 80 // also save r29(rip) to allow change in LinkNext
++    st.d   $zero, $sp, 88
++    // Mark the active linker frame in the sentinel left by la64_prolog.
++    la.global $r16, la64_next
++    st.d   $r16, $sp, 96
++    st.d   $sp, $sp, 104
+ 
+     move   $a0, Emu
+     move   $a1, RIP
+@@ -39,6 +44,9 @@ la64_next:
+     addi.d $a3, $sp, 80  // a3 is address to change rip
+     // call the function
+     bl LinkNext
++    // Clear the marker before leaving the active LinkNext call.
++    st.d   $zero, $sp, 96
++    st.d   $zero, $sp, 104
+     // preserve return value
+     move   $r16, $a0
+     // pop regs
+@@ -53,14 +61,14 @@ la64_next:
+     ld.d   RSP, $sp, 64
+     ld.d   RBP, $sp, 72
+     ld.d   RIP, $sp, 80
+-    addi.d $sp, $sp, (8 * 11)
++    addi.d $sp, $sp, (8 * 12)
+     // return offset is jump address
+     jr     $r16
+ 
+ la64_next_invalid:
+     // move emu to a0
+     // move IP address to a1
+-    addi.d $sp, $sp, -(8 * 11)
++    addi.d $sp, $sp, -(8 * 12)
+     st.d   RDI, $sp, 0
+     st.d   RSI, $sp, 8
+     st.d   RDX, $sp, 16
+@@ -72,6 +80,11 @@ la64_next_invalid:
+     st.d   RSP, $sp, 64
+     st.d   RBP, $sp, 72
+     st.d   RIP, $sp, 80 // also save r29(rip) to allow change in LinkNext
++    st.d   $zero, $sp, 88
++    // Mark the active linker frame in the sentinel left by la64_prolog.
++    la.global $r16, la64_next_invalid
++    st.d   $r16, $sp, 96
++    st.d   $sp, $sp, 104
+ 
+     move   $a0, Emu
+     move   $a1, RIP
+@@ -79,6 +92,9 @@ la64_next_invalid:
+     addi.d $a3, $sp, 80  // a3 is address to change rip
+     // call the function
+     bl LinkNextInvalid
++    // Clear the marker before leaving the active LinkNextInvalid call.
++    st.d   $zero, $sp, 96
++    st.d   $zero, $sp, 104
+     // preserve return value
+     move   $r16, $a0
+     // pop regs
+@@ -93,6 +109,6 @@ la64_next_invalid:
+     ld.d   RSP, $sp, 64
+     ld.d   RBP, $sp, 72
+     ld.d   RIP, $sp, 80
+-    addi.d $sp, $sp, (8 * 11)
++    addi.d $sp, $sp, (8 * 12)
+     // return offset is jump address
+     jr     $r16
