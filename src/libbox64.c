@@ -844,9 +844,7 @@ BOX64_API uint64_t box64_bridge_sp(void* emuv) {
   return R_RSP;
 }
 
-/* Bridge with the default six-integer-register wrapper. The historical
- * `fmt` parameter was never read; E1 removes it (see docs/contract-changes.md:
- * `box64_callback(void*, const char*)` -> `box64_callback(void*)`). */
+/* Bridge with the default six-integer-register wrapper. */
 BOX64_API void* box64_callback(void* host_fn) {
   return box64_callback_with(host_fn, (void*)bridge_host6);
 }

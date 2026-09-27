@@ -1,10 +1,7 @@
 # Vendored box64 and source provenance
 
 The engine is the **upstream** box64 repository, checked out as the git submodule
-`vendor/box64`, plus the ordered patch queue in `patches/`. The pre-submodule
-vendored copy under `third_party/box64` has been retired; everything it carried
-is either in the patch queue or listed below as provably unreachable in this
-build.
+`vendor/box64`, plus the ordered patch queue in `patches/`.
 
 ## Engine source (upstream submodule)
 
@@ -71,52 +68,6 @@ worktree in one shot:
 ```sh
 tools/verify_box64_patch.sh --check
 ```
-
-## How the queue was reconstructed
-
-The queue was built by comparing three disposable trees (nothing was edited in
-this repository's worktree to derive it):
-
-1. pristine `git archive` of box64 `v0.4.2`;
-2. that tree plus `patches/0001..0010` (all ten applied cleanly);
-3. the retired tracked `third_party/box64` at commit
-   `e4cfd28` (`git archive HEAD third_party/box64`).
-
-Tree 2 vs tree 3: **27 files differ, 12 files exist only in tree 3, and 21
-upstream files/directories were absent** from tree 3 (upstream docs, packaging,
-`tests/`, `wine/`, `x64lib/`, `system/`, … — the old vendor copy was pruned).
-
-- The 12 tree-only/behaviour-affecting files are exactly what `0011..0018`
-  restore; after applying the full queue, every one of them is byte-identical to
-  tree 3.
-- The missing upstream files are simply back: the submodule is a complete
-  upstream checkout, and no build step depends on them.
-- The remaining 27-file differences are the unreachable changes enumerated in
-  `patches/README.md` (never-defined `WINE_BOX64CPU_*` macros, `_WIN32`-only
-  paths, the two Wine-hosted `src/os` files CMake does not compile,
-  `wine_step/` + `Makefile.in`, the `#if 0` block in `x64int3.c`, and the
-  generated wrapper heads that `rebuild_wrappers.py` regenerates from the
-  grafted private headers).
-
-The `WINE_BOX64CPU_*` claim was checked against the real build, not only by
-reading: the retired tree's `compile_commands.json` defines only `DYNAREC`,
-`LA64`, `NDEBUG`, `STEP`, `TEST_INTERPRETER` and `BAD_PKILL`, and no
-`_WIN32`/`WINE_BOX64CPU_*` macro appears anywhere in this repository.
-
-## Pre-submodule snapshot (historical)
-
-The retired `third_party/box64` copy came from the E1 snapshot recorded below;
-it is kept here because it documents the tree the patch queue was audited
-against.
-
-- Snapshot id: `20260925T124449Z`
-- Archive: `.rebuild/snapshots/20260925T124449Z/archives/libbox64dl-src.tar.gz`
-- sha256: `6e051c64d52d48acb4394bbb786de70169bd954cac445d3ac1520ac69cf69b43`
-- Old repository HEAD at snapshot time:
-  `libbox64dl 6a8604d2e030261b7854def96d3ce09b4873cae5` (branch `test`)
-- Vendored copy at the migration commit: `third_party/box64`,
-  2363 files, no upstream SHA of its own — which is precisely why it could not
-  be rebuilt from upstream and was replaced by the submodule + queue above.
 
 ## Build caches
 

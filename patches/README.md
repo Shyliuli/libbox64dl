@@ -42,50 +42,13 @@ make patch                            # apply the queue to vendor/box64
 | `0017-interpreter-fpu-exception-flags.patch` | interpreter FSQRT sets the x87 C0 flag |
 | `0018-compile-portability-includes.patch` | `signals.h` / `dynablock.c` / `rbtree.c` include fixes |
 
-Patches `0001..0010` are the embedded-engine/toolkit changes; `0011..0018`
-reconstruct the behaviour of the pre-submodule vendored tree that the previous
-`third_party/box64` copy carried as unpatched local edits (`make` could not
-rebuild that tree from a pristine checkout). Each header states its rationale.
+Patches `0001..0010` are the embedded-engine/toolkit changes; `0011..0018` are
+build and behaviour fixes against pristine upstream. Each header states its
+rationale.
 
-## Deliberately not in the queue
-
-The queue reproduces every **compiled, behaviour-affecting** difference between
-`upstream v0.4.2 + previous patches` and the old vendored tree. The following old
-local differences are intentionally absent; they are unreachable in this build
-and/or regenerated, not silently dropped:
-
-- **`WINE_BOX64CPU_*` toggles** in `src/tools/env.c`, `src/libtools/sigtools.c`,
-  `src/dynarec/dynarec_native_pass.c`, `src/dynarec/la64/dynarec_la64_00.c`,
-  `src/dynarec/la64/dynarec_la64_helper.h`,
-  `src/dynarec/la64/dynarec_la64_consts.{c,h}` and `src/include/mysignal.h`.
-  The macros are defined nowhere in this repository, and the build's
-  `compile_commands.json` carries only `-DDYNAREC -DLA64 -DNDEBUG -DSTEP
-  -DTEST_INTERPRETER -DBAD_PKILL` (no `_WIN32`, no `WINE_BOX64CPU_*`), so the
-  upstream branch is what compiles. The `_WIN32` guards they add are equally
-  inactive on the LA64 Linux host.
-- **Wine-hosted sources** `src/os/os_wine.c` and `src/os/emit_signal_wine.c`.
-  CMake's `OS_LINUX_SRC` selects `os_linux.c` / `emit_signals_linux.c`; the wine
-  variants are not compiled here.
-- **`src/dynarec/la64/wine_step/`** (64 never-referenced experiment files) and
-  **`Makefile.in`** (the autotools file is not in upstream v0.4.2 and no build
-  step reads it).
-- **`src/emu/x64int3.c`** — the diagnostic block in the old tree is inside
-  `#if 0`.
-- **Generated wrapper heads** — `src/wrapped/generated/{functions_list.txt,
-  wrapper.c,wrapper.h,wrapped*defs.h,wrapped*types.h,wrapped*undefs.h}` and
-  `wrapper_min.c` are produced by box64's own `rebuild_wrappers.py` from the
-  `*_private.h` files the build passes it (including the grafted
-  `wrappedbox64dnative_private.h` and `plugins/libgccs`). The seven new
-  signatures patch 0016 prints all come from those private headers, so the heads
-  are regenerated rather than patched. The old tree's `wrappedlibnode*` heads
-  came from a `libnode` plugin that is not part of this repository.
-- **Build residue** — `*.orig` patch pre-images, `build/`, `build-pic/`,
-  `rust/target/`, `src/git_head.h` and the patch stamp are ignored by
-  `.gitmodules` (`ignore = untracked`) and never tracked.
-
-## Relationship to the old `third_party/box64` copy
-
-`docs/vendor-provenance.md` records how the pre-submodule copy was audited
-against this queue: pristine v0.4.2 plus `0001..0010` differed from the old tree
-in 27 files, 12 tree-only files and 21 upstream files; `0011..0018` close the 12
-behaviour-affecting files, and the list above is the remainder.
+Build residue — `*.orig` patch pre-images, `build/`, `build-pic/`,
+`rust/target/`, `src/git_head.h` and the patch stamp — is ignored by
+`.gitmodules` (`ignore = untracked`) and never tracked. The generated wrapper
+heads under `src/wrapped/generated/` are produced by box64's own
+`rebuild_wrappers.py` from the grafted `*_private.h` files, so they are
+regenerated rather than patched.

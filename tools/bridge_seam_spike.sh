@@ -6,17 +6,14 @@
 # the check that the engine's exported box64_register_native_module() resolves
 # the provider's weak declaration and accepts the provider's real descriptor.
 #
-# The provider tree defaults to ../../../uninode/native relative to this
-# repository (the candidate checkout lives under .rebuild/work/libbox64dl).
-# Override with BRIDGE_PROVIDER_DIR. A missing provider tree is a hard FAIL:
-# this target exists to run that link, so "nothing to check" must never pass.
+# The provider tree is $UNINODE/native, with UNINODE defaulting to ../uninode.
+# BRIDGE_PROVIDER_DIR overrides the native/ directory directly. A missing
+# provider tree is a hard FAIL: this target exists to run that link, so
+# "nothing to check" must never pass.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-# Default provider tree: the live sibling checkout (../uninode/native), with the
-# .rebuild/work/libbox64dl candidate layout as a fallback.
-provider=${BRIDGE_PROVIDER_DIR:-$root/../uninode/native}
-[ -d "$provider" ] || provider=$root/../../../uninode/native
+provider=${BRIDGE_PROVIDER_DIR:-${UNINODE:-$root/../uninode}/native}
 provider_wrapped=$(cd "$provider/../wrapped" 2>/dev/null && pwd) || provider_wrapped=""
 cc=${CC:-cc}
 

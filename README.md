@@ -60,7 +60,7 @@ descriptor。`box64_fpr_t` 始终携带一份 SSE 寄存器的完整 16 字节�
 `uint32_t`，生成期仍会检查其不会溢出 descriptor 字段。
 
 `flags` 只接受两位：`BOX64_CALL_FLAG_FORCE_FRAME`（`stack_len == 0` 也保留一个锚定
-frame；非零 `stack_len` 本来就锚定）和 `BOX64_CALL_FLAG_FULL_REGS`（走历史通用
+frame；非零 `stack_len` 本来就锚定）和 `BOX64_CALL_FLAG_FULL_REGS`（走通用
 `DynaCall`，正常返回后把调用前的 RDI/RSI/RBX/RBP 额外写回；不设则走 `DynaCall_abi`，
 恰好跳过这组恢复，其余 RSP/RIP/eflags/长跳转规则完全相同，其它寄存器两种模式都不
 恢复）。它是**调用方可见的后置条件**，不是按 ABI 自动优化：需要这四个寄存器跨调用保持
@@ -195,9 +195,8 @@ unilib 和 uninode 都建立在这个原语上：前者用它做 `dlsym` 的 hos
 | `vendor/box64/build/libbox64.a` | 宿主可执行文件 |
 | `vendor/box64/build-pic/libbox64.a` | `.so` / `.node` 消费者 |
 
-两份都开 dynarec。曾经认为 PIC 那份必须关掉，理由是 LoongArch dynarec 会发 TLS_LE
-重定位、共享对象里放不下——实际上 TLS_LE 只在按默认的**非 PIC** 方式构建 box64 时才
-出现，`-fPIC` 下编译器发的是 TLS_LD，链接没有问题。实测 guest 侧哈希快约 3 倍。
+两份都开 dynarec。LoongArch dynarec 的 TLS_LE 重定位只在**非 PIC** 构建时出现，
+`-fPIC` 下编译器发的是 TLS_LD，放进共享对象没有问题。开 dynarec 时 guest 侧哈希约快 3 倍。
 
 回退有两级，不必都用：
 
@@ -276,8 +275,7 @@ wrapped library：
 用公开的 `box64_native_function()`（内部 `GetNativeFnc` 的公开形态）。
 
 因此本仓**既**能 engine-only 独立构建/测试（`check-no-node` 只看当前 graft 与产物，
-`plugins/` 只允许 `libgccs`），**也**能在运行时装载兄弟仓的 provider，而不再需要
-`libbox64dl/plugins/libnode` 软链。描述符布局、注入点与运行时构造见
+`plugins/` 只允许 `libgccs`），**也**能在运行时装载兄弟仓的 provider。描述符布局、注入点与运行时构造见
 `include/libbox64_native_module.h`、`patches/0010-native-module-seam.patch` 与
 `src/native_module_lib.c`。
 
@@ -285,7 +283,7 @@ wrapped library：
 源：`tools/check_no_node.sh` 在构建输入层面断言这一点（活动 graft/provider 无 libnode：
 `plugins/libnode` 不存在、无活跃 symlink 指向 uninode；plugin 集只有 `libgccs`、
 生成的 cmake/list 无 Node 名、Makefile 不引用兄弟仓库、源码不 include Node/uv 头；
-vendored 树里 upstream 自带的 generated 头与旧 build cache 不属于当前 graft，不判失败）。`make graft` 只把 `VENDOR_SRC` 列出的 C/asm 软链进
+vendored 树里 upstream 自带的 generated 头与 build cache 不属于当前 graft，不判失败）。`make graft` 只把 `VENDOR_SRC` 列出的 C/asm 软链进
 vendored 树；`src/core_shim.c` 与 `src/pt_mutex/*` 由 Rust crate 的 build script
 编译，**不**进 engine archive。seam 的引擎侧源（`src/native_module*.c`、
 `src/wrappedbox64dnative*`）只含 SysV signature token，不含任何 Node 符号。
@@ -362,9 +360,9 @@ BOX64DL_SIGNAL_LIBRARY_RULES='libspecial.so=compat' \
    `src/native_module_lib.c`
 
 `0011` 还包含 `libbox64` STATIC target、`main.c`/`test.c` 的 `BOX64_MAIN_SRC` 拆分与
-`-rdynamic`；`0013`–`0018` 是上一版 `third_party/box64` 里以手改形式存在、无法从干净
-上游重建的行为差异（x87 tag word/FXSAVE、LA64 FSQRT 标志与未对齐 16 位原子、LinkNext
-帧标记、printer 签名、解释器 FSQRT、include 可移植性）。每条的动机见 patch 头。
+`-rdynamic`；`0013`–`0018` 是相对上游的行为修正（x87 tag word/FXSAVE、LA64 FSQRT
+标志与未对齐 16 位原子、LinkNext 帧标记、printer 签名、解释器 FSQRT、include 可移植性）。
+每条的动机见 patch 头。
 
 验证整条链（submodule commit、patch 哈希、干净上游可应用、工作树无漂移）：
 
@@ -372,10 +370,7 @@ BOX64DL_SIGNAL_LIBRARY_RULES='libspecial.so=compat' \
 tools/verify_box64_patch.sh --check
 ```
 
-未纳入队列的旧本地差异（从未定义的 `WINE_BOX64CPU_*` 开关、`_WIN32` 分支、CMake 不编译
-的两个 Wine `src/os` 文件、`wine_step/`、`Makefile.in`、`#if 0` 调试块、由
-`rebuild_wrappers.py` 重新生成的 wrapper 头）逐条列在
-[`patches/README.md`](patches/README.md)；迁移审计见
+补丁明细见 [`patches/README.md`](patches/README.md)；上游来源与锁定见
 [`docs/vendor-provenance.md`](docs/vendor-provenance.md)。
 
 ## 嵌入时的三个坑
@@ -402,6 +397,6 @@ MIT，见 [`LICENSE`](LICENSE)。
 （tag `v0.4.2`，commit `7eeb5016493dab4e143d53da50dd47bfb44a9509`），同为 MIT，版权归
 ptitSeb（见该目录下的 `LICENSE`）。本仓库对它的本地改动是 `patches/0001`–`0018` 的编号
 补丁；除此之外只有 submodule 工作树里的 graft 软链、生成物与构建目录，都不提交。来源、
-上游 commit、队列明细与"哪些旧本地差异被判定为不可达"的审计见
+上游 commit 与队列明细见
 [`docs/vendor-provenance.md`](docs/vendor-provenance.md) 与
 [`patches/README.md`](patches/README.md)。

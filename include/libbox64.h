@@ -27,8 +27,7 @@ BOX64_API void box64_lib_fini(void);
  * box64_lib_init() is explicitly refused with a clear reason in
  * box64_dlerror() (final shutdown does not support re-initialisation). C API
  * guards (dlsym/dlclose/call) use this or the borrow-validity of the live
- * context, never a second state copy. The historical alias box64_lib_ready()
- * is gone (see docs/contract-changes.md). */
+ * context, never a second state copy. */
 BOX64_API int box64_is_ready(void);
 /* Ensure the current thread has a properly sized guest emu (8 MiB stack),
  * instead of box64's 256 KiB fallback used by RunFunctionFmt. */
@@ -202,10 +201,7 @@ typedef struct box64_signal_stats {
 BOX64_API void box64_signal_stats_enable(int on);
 BOX64_API void box64_signal_stats(box64_signal_stats_t* out);
 
-/* Host function -> guest-callable address, six integer registers forwarded.
- * The historical second parameter (`const char* fmt`) was never read and has
- * been removed; it is a documented source/ABI break in
- * docs/contract-changes.md. */
+/* Host function -> guest-callable address, six integer registers forwarded. */
 BOX64_API void* box64_callback(void* host_fn);
 
 /*
