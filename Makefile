@@ -21,6 +21,9 @@ ARCH_SUFFIX := $(if $(filter x86_64,$(LIBBOX64DL_ARCH)),-x64,)
 BUILD_STATIC := $(BOX64)/build$(ARCH_SUFFIX)
 BUILD_PIC := $(BOX64)/build-pic$(ARCH_SUFFIX)
 NPROC := $(shell nproc)
+RUST_TARGET := $(if $(filter x86_64,$(LIBBOX64DL_ARCH)),x86_64-unknown-linux-gnu,)
+RUST_TARGET_ARG := $(if $(RUST_TARGET),--target $(RUST_TARGET),)
+RUST_TARGET_SUFFIX := $(if $(RUST_TARGET),-x64,)
 
 # Ordered patches against the pristine submodule checkout (see patches/).
 PATCHES := $(sort $(wildcard $(ROOT)/patches/*.patch))
@@ -170,9 +173,13 @@ test-reset-stack: $(TEST_RESET_STACK)
 # flavor keeps its own cargo target dir so both artifacts can coexist.
 rust: rust-static
 rust-static: $(BUILD_STATIC)/libbox64.a
-	cd rust && CARGO_TARGET_DIR=target/static LIBBOX64_BUILD_DIR=$(BUILD_STATIC) cargo build
+	cd rust && CARGO_TARGET_DIR=target/static$(RUST_TARGET_SUFFIX) LIBBOX64_BUILD_DIR=$(BUILD_STATIC) \
+		CC_x86_64_unknown_linux_gnu=$(CC) AR_x86_64_unknown_linux_gnu=$(AR) \
+		CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$(CC) cargo build $(RUST_TARGET_ARG)
 rust-pic: $(BUILD_PIC)/libbox64.a
-	cd rust && CARGO_TARGET_DIR=target/pic LIBBOX64_FLAVOR=pic LIBBOX64_BUILD_DIR=$(BUILD_PIC) cargo build
+	cd rust && CARGO_TARGET_DIR=target/pic$(RUST_TARGET_SUFFIX) LIBBOX64_FLAVOR=pic LIBBOX64_BUILD_DIR=$(BUILD_PIC) \
+		CC_x86_64_unknown_linux_gnu=$(CC) AR_x86_64_unknown_linux_gnu=$(AR) \
+		CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$(CC) cargo build $(RUST_TARGET_ARG)
 
 # ---- packaged box64 CLI: the runtime/bin/box64 an app tree ships ----
 # Thin main (cli/box64_main.c) over the static engine, linked with the same
@@ -181,10 +188,10 @@ rust-pic: $(BUILD_PIC)/libbox64.a
 # companion children (wineserver/wineboot) re-exec through this binary
 # exactly like through a system box64.
 CLI := $(ROOT)/build/bin/box64
-RUST_STATIC := $(ROOT)/rust/target/static/debug/liblibbox64.a
+RUST_STATIC := $(ROOT)/rust/target/static$(RUST_TARGET_SUFFIX)/$(if $(RUST_TARGET),$(RUST_TARGET)/,)debug/liblibbox64.a
 
 SHARED := $(ROOT)/build/lib/libbox64dl.so
-RUST_PIC := $(ROOT)/rust/target/pic/debug/liblibbox64.a
+RUST_PIC := $(ROOT)/rust/target/pic$(RUST_TARGET_SUFFIX)/$(if $(RUST_TARGET),$(RUST_TARGET)/,)debug/liblibbox64.a
 
 # ---- explicit native-module seam ---------------------------------------
 # The engine side of the sibling provider's explicit native-module registration
