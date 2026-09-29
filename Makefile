@@ -17,11 +17,11 @@ BOX64 := $(ROOT)/vendor/box64
 # building a different engine than the patch queue was written for.
 BOX64_REF := 7eeb5016493dab4e143d53da50dd47bfb44a9509
 LIBBOX64DL_ARCH ?= $(if $(filter x86_64 amd64,$(shell uname -m)),x86_64,loongarch64)
-ARCH_SUFFIX := $(if $(filter x86_64,$(LIBBOX64DL_ARCH)),-x64,)
+ARCH_SUFFIX := $(if $(filter x86_64 amd64,$(LIBBOX64DL_ARCH)),-x64,)
 BUILD_STATIC := $(BOX64)/build$(ARCH_SUFFIX)
 BUILD_PIC := $(BOX64)/build-pic$(ARCH_SUFFIX)
 NPROC := $(shell nproc)
-RUST_TARGET := $(if $(filter x86_64,$(LIBBOX64DL_ARCH)),x86_64-unknown-linux-gnu,)
+RUST_TARGET := $(if $(filter x86_64 amd64,$(LIBBOX64DL_ARCH)),x86_64-unknown-linux-gnu,)
 RUST_TARGET_ARG := $(if $(RUST_TARGET),--target $(RUST_TARGET),)
 RUST_TARGET_SUFFIX := $(if $(RUST_TARGET),-x64,)
 DYNAREC_STATIC := $(wildcard $(BUILD_STATIC)/libdynarec.a)
@@ -78,7 +78,7 @@ endif
 # default on an x86_64 host).  The x64-only build is intentionally interpreter
 # first: it is a useful gdb/debug artifact before a native CPU backend exists.
 LIBBOX64_NATIVE_X64 ?= OFF
-ifeq ($(LIBBOX64DL_ARCH),x86_64)
+ifneq ($(filter x86_64 amd64,$(LIBBOX64DL_ARCH)),)
 THUNK_ASM := $(ROOT)/src/thunk_x64.S
 ARCH_CMAKE := -DLARCH64=OFF
 NATIVE_CALL_SRC := $(if $(filter ON on 1,$(LIBBOX64_NATIVE_X64)),$(ROOT)/src/native_call_x64.S,)
