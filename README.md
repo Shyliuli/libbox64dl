@@ -211,6 +211,11 @@ BOX64_DYNAREC=0 ./your-app # 运行期回退，无需重新构建
 ```bash
 make          # 两份都构建
 make pic      # 只构建 PIC（.so / DSO 消费者）
+
+# x86_64 debug build, isolated from the existing LoongArch outputs:
+make LIBBOX64DL_ARCH=x86_64 CC=x86_64-linux-gnu-gcc static
+make LIBBOX64DL_ARCH=x86_64 CC=x86_64-linux-gnu-gcc rust-static
+# outputs: vendor/box64/build-x64 and rust/target/static-x64/x86_64-unknown-linux-gnu
 make static   # 只构建静态（进程内静态链接消费者）
 make shared   # 引擎 DSO + 版本脚本（build/lib/libbox64dl.so）
 make cli      # 打包版 box64 CLI（build/bin/box64，动态链接该 DSO）
