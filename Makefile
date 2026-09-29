@@ -76,17 +76,23 @@ endif
 # LIBBOX64DL_ARCH=x86_64 when cross-building on LoongArch (or use the native
 # default on an x86_64 host).  The x64-only build is intentionally interpreter
 # first: it is a useful gdb/debug artifact before a native CPU backend exists.
+LIBBOX64_NATIVE_X64 ?= OFF
 ifeq ($(LIBBOX64DL_ARCH),x86_64)
 THUNK_ASM := $(ROOT)/src/thunk_x64.S
 ARCH_CMAKE := -DLARCH64=OFF
+NATIVE_CALL_SRC := $(if $(filter ON on 1,$(LIBBOX64_NATIVE_X64)),$(ROOT)/src/native_call_x64.S,)
+NATIVE_CFLAGS := $(if $(NATIVE_CALL_SRC),-DBOX64_X64_NATIVE=1,)
 else
+NATIVE_CALL_SRC :=
+NATIVE_CFLAGS :=
+
 THUNK_ASM := $(ROOT)/src/thunk_la64.S
 ARCH_CMAKE := -DLARCH64=ON
 endif
 
 VENDOR_SRC := $(ROOT)/src/diag.c $(ROOT)/src/libbox64.c \
 	$(ROOT)/src/signal_policy.c $(ROOT)/src/signal_route.c \
-	$(ROOT)/src/thunk.c $(THUNK_ASM) \
+	$(ROOT)/src/thunk.c $(THUNK_ASM) $(NATIVE_CALL_SRC) \
 	$(ROOT)/src/native_module.c $(ROOT)/src/native_module_lib.c
 
 # The engine-owned signature module. It is a WRAPPEDS entry (not an ELFLOADER
@@ -99,6 +105,7 @@ NATIVE_SIG_PRIVATE := $(ROOT)/src/wrappedbox64dnative_private.h
 
 CMAKE_COMMON := $(ARCH_CMAKE) -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 	-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+	-DCMAKE_C_FLAGS="$(NATIVE_CFLAGS)" \
 	-DNOLOADADDR=ON -DNO_CONF_INSTALL=ON -DNO_LIB_INSTALL=ON
 
 # Dynarec does work inside a shared object. The old blocker was TLS_LE
@@ -113,7 +120,7 @@ PIC_DYNAREC ?= ON
 # -ftls-model is redundant under -fPIC on this toolchain; kept as a guard in
 # case another one defaults to local-exec.
 CMAKE_PIC := $(CMAKE_COMMON) -DLARCH64_DYNAREC=$(PIC_DYNAREC) \
-	-DCMAKE_C_FLAGS="-fPIC -ftls-model=global-dynamic" \
+	-DCMAKE_C_FLAGS="-fPIC -ftls-model=global-dynamic $(NATIVE_CFLAGS)" \
 	-DCMAKE_ASM_FLAGS="-fPIC"
 
 .PHONY: all static pic patch unpatch vendor check-vendor check-vendor-patches graft prune-stale-grafts plugins plugin-manifest check-plugins check-exports check-exports-negative test test-all test-detach-guest test-reset-stack test-call-arity test-call-plan test-call-fini test-call-unified bench-call-arity test-signal-policy test-signal-route test-guest-signal test-signal-library bench-signal-policy clean distclean rust rust-static \

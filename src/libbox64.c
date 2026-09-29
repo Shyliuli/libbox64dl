@@ -32,6 +32,9 @@ int unittest(int argc, const char** argv) {
 #include "box64context.h"
 #include "elfload_dump.h"
 #include "elfs/elfloader_private.h"
+#ifdef BOX64_X64_NATIVE
+extern int box64_native_call_x64(void*, const box64_call_desc_t*, box64_call_results_t*);
+#endif
 #include "box64cpu.h"
 #include "elfloader.h"
 #include "library.h"
@@ -900,6 +903,23 @@ BOX64_API box64_call_status_t box64_call_desc(
     set_err_fmt("box64_call_desc: %s", why ? why : "invalid descriptor");
     return status;
   }
+#ifdef BOX64_X64_NATIVE
+  /* On an x86_64 host the guest ISA is the host ISA.  The debug flavor can
+   * therefore enter the loaded image directly, while retaining the normal
+   * Box64 loader, wrapped-library registration and lifecycle machinery. */
+  if (engine_admit() != 0)
+    return call_reject(BOX64_CALL_NOT_READY, "box64_call_desc: engine is not ready");
+  {
+    box64_call_results_t local = {{0}};
+    box64_call_results_t *dst = out ? out : &local;
+    int rc = box64_native_call_x64(sym, desc, dst);
+    engine_release();
+    if (rc != 0)
+      return call_reject(BOX64_CALL_ENGINE_REFUSED, "box64_call_desc: native call refused");
+    set_err(NULL);
+    return BOX64_CALL_OK;
+  }
+#endif
   const call_request_t req = {
       desc->flags,
       desc->gpr_mask,
