@@ -93,6 +93,7 @@ static void check_rejected_unchanged(void* sym, box64_call_desc_t* d,
 }
 
 int main(int argc, char** argv) {
+  setvbuf(stdout, NULL, _IONBF, 0);
   void* s_zero;
   void* s_all1;
   void* s_id;

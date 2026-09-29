@@ -998,9 +998,30 @@ BOX64_API uint64_t box64_bridge_sp(void* emuv) {
   return R_RSP;
 }
 
+#ifdef BOX64_X64_NATIVE
+static void* native_callback_thunk(void* host_fn) {
+  unsigned char code[16] = {0x49, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0,
+                            0x41, 0xff, 0xe3};
+  void* p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (p == MAP_FAILED) return NULL;
+  memcpy(code + 2, &host_fn, sizeof(host_fn));
+  memcpy(p, code, sizeof code);
+  if (mprotect(p, 4096, PROT_READ | PROT_EXEC) != 0) {
+    munmap(p, 4096);
+    return NULL;
+  }
+  return p;
+}
+#endif
+
 /* Bridge with the default six-integer-register wrapper. */
 BOX64_API void* box64_callback(void* host_fn) {
+#ifdef BOX64_X64_NATIVE
+  return host_fn;
+#else
   return box64_callback_with(host_fn, (void*)bridge_host6);
+#endif
 }
 
 /*
@@ -1015,9 +1036,10 @@ BOX64_API void* box64_callback_with(void* host_fn, void* bridge_fn) {
   if (!box64_is_ready() && box64_lib_init() != 0) return NULL;
   if (!host_fn || !bridge_fn) return NULL;
 #ifdef BOX64_X64_NATIVE
-  /* Guest and host share the SysV x86_64 ABI in this debug flavor, so a
-   * callback needs no INT3 bridge and no emu register-file adapter. */
-  return host_fn;
+  /* Guest and host share the SysV x86_64 ABI in this debug flavor, so the
+   * thunk only needs to provide a unique executable identity for each bridge
+   * registration. */
+  return native_callback_thunk(host_fn);
 #endif
   if (engine_admit() != 0) {
     set_err("box64_callback_with: engine is not ready");
