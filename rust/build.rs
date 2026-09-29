@@ -47,6 +47,9 @@ fn main() {
             make.env("LIBBOX64DL_ARCH", "x86_64");
             make.env("CC", "x86_64-linux-gnu-gcc");
             make.env("CXX", "x86_64-linux-gnu-g++");
+            if let Ok(native) = env::var("LIBBOX64_NATIVE_X64") {
+                make.env("LIBBOX64_NATIVE_X64", native);
+            }
         }
         let status = make.status()
             .expect("failed to run make for the vendored engine");

@@ -182,11 +182,11 @@ test-reset-stack: $(TEST_RESET_STACK)
 # flavor keeps its own cargo target dir so both artifacts can coexist.
 rust: rust-static
 rust-static: $(BUILD_STATIC)/libbox64.a
-	cd rust && CARGO_TARGET_DIR=target/static$(RUST_TARGET_SUFFIX) LIBBOX64_BUILD_DIR=$(BUILD_STATIC) \
+	cd rust && CARGO_TARGET_DIR=target/static$(RUST_TARGET_SUFFIX) LIBBOX64_BUILD_DIR=$(BUILD_STATIC) LIBBOX64_NATIVE_X64=$(LIBBOX64_NATIVE_X64) \
 		CC_x86_64_unknown_linux_gnu=$(CC) AR_x86_64_unknown_linux_gnu=$(AR) \
 		CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$(CC) cargo build $(RUST_TARGET_ARG)
 rust-pic: $(BUILD_PIC)/libbox64.a
-	cd rust && CARGO_TARGET_DIR=target/pic$(RUST_TARGET_SUFFIX) LIBBOX64_FLAVOR=pic LIBBOX64_BUILD_DIR=$(BUILD_PIC) \
+	cd rust && CARGO_TARGET_DIR=target/pic$(RUST_TARGET_SUFFIX) LIBBOX64_FLAVOR=pic LIBBOX64_BUILD_DIR=$(BUILD_PIC) LIBBOX64_NATIVE_X64=$(LIBBOX64_NATIVE_X64) \
 		CC_x86_64_unknown_linux_gnu=$(CC) AR_x86_64_unknown_linux_gnu=$(AR) \
 		CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$(CC) cargo build $(RUST_TARGET_ARG)
 
