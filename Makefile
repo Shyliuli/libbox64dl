@@ -24,6 +24,8 @@ NPROC := $(shell nproc)
 RUST_TARGET := $(if $(filter x86_64,$(LIBBOX64DL_ARCH)),x86_64-unknown-linux-gnu,)
 RUST_TARGET_ARG := $(if $(RUST_TARGET),--target $(RUST_TARGET),)
 RUST_TARGET_SUFFIX := $(if $(RUST_TARGET),-x64,)
+DYNAREC_STATIC := $(wildcard $(BUILD_STATIC)/libdynarec.a)
+DYNAREC_PIC := $(wildcard $(BUILD_PIC)/libdynarec.a)
 
 # Ordered patches against the pristine submodule checkout (see patches/).
 PATCHES := $(sort $(wildcard $(ROOT)/patches/*.patch))
@@ -144,7 +146,7 @@ $(TEST_DETACH_GUEST): tests/test_detach_guest.c $(BUILD_STATIC)/libbox64.a $(RUS
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_detach_guest.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -161,7 +163,7 @@ $(TEST_RESET_STACK): tests/test_reset_stack.c $(BUILD_STATIC)/libbox64.a $(RUST_
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_reset_stack.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -246,7 +248,7 @@ $(TEST_BRIDGE_WIRING): tests/test_bridge_wiring.c $(BUILD_STATIC)/libbox64.a \
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_bridge_wiring.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -343,7 +345,7 @@ $(RUST_PIC): FORCE $(BUILD_PIC)/libbox64.a
 # the single source tools/check_linkage.sh reads, so the gate cannot drift from
 # the real link.
 define SHARED_LINK
-$(CC) -fPIC -Iinclude -I$(BOX64)/src/include -shared -Wl,-soname,libbox64dl.so -Wl,-z,defs -Wl,--version-script=src/libbox64dl.map -o $(SHARED) cli/entry.c -Wl,--whole-archive $(BUILD_PIC)/libbox64.a $(BUILD_PIC)/libdynarec.a -Wl,--no-whole-archive $(RUST_PIC) -lpthread -lm -ldl -lrt -lresolv -lutil
+$(CC) -fPIC -Iinclude -I$(BOX64)/src/include -shared -Wl,-soname,libbox64dl.so -Wl,-z,defs -Wl,--version-script=src/libbox64dl.map -o $(SHARED) cli/entry.c -Wl,--whole-archive $(BUILD_PIC)/libbox64.a $(DYNAREC_PIC) -Wl,--no-whole-archive $(RUST_PIC) -lpthread -lm -ldl -lrt -lresolv -lutil
 endef
 export SHARED_LINK
 
@@ -444,7 +446,7 @@ $(TEST_CALL_ARITY): tests/test_call_arity.c $(GUEST_CALL_SO) $(BUILD_STATIC)/lib
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_call_arity.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -463,7 +465,7 @@ $(TEST_BENCH_ARITY): tests/bench_call_arity.c $(GUEST_CALL_SO) $(BUILD_STATIC)/l
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/bench_call_arity.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -478,7 +480,7 @@ $(TEST_CALL_PLAN): tests/test_call_plan.c $(GUEST_CALL_SO) $(BUILD_STATIC)/libbo
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_call_plan.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -493,7 +495,7 @@ $(TEST_CALL_UNIFIED): tests/test_call_unified.c $(GUEST_CALL_SO) $(BUILD_STATIC)
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_call_unified.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -507,7 +509,7 @@ $(TEST_CALL_FINI): tests/test_call_fini.c $(GUEST_CALL_SO) $(BUILD_STATIC)/libbo
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_call_fini.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -523,7 +525,7 @@ $(TEST_FINI_RACE): tests/test_fini_race.c $(GUEST_CALL_SO) $(BUILD_STATIC)/libbo
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_fini_race.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -541,7 +543,7 @@ $(TEST_SIGNAL_POLICY): tests/test_signal_policy.c $(GUEST_CALL_SO) $(BUILD_STATI
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_signal_policy.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -591,7 +593,7 @@ $(TEST_SIGNAL_ROUTE): tests/test_signal_route.c $(GUEST_CALL_SO) $(BUILD_STATIC)
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_signal_route.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -608,7 +610,7 @@ $(TEST_GUEST_SIGNAL): tests/test_guest_signal.c $(GUEST_SIG_SO) $(BUILD_STATIC)/
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_guest_signal.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -632,7 +634,7 @@ $(TEST_SIGNAL_LIBRARY): tests/test_signal_library.c $(GUEST_CALL_SO) $(GUEST_SIG
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_signal_library.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
@@ -680,7 +682,7 @@ $(TEST_BENCH_SIGNAL): tests/bench_signal_policy.c $(GUEST_CALL_SO) $(BUILD_STATI
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
 		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/bench_signal_policy.c \
-		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(BUILD_STATIC)/libdynarec.a \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
