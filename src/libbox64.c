@@ -909,10 +909,9 @@ BOX64_API box64_call_status_t box64_call_desc(
    * Box64 loader, wrapped-library registration and lifecycle machinery. */
   if (engine_admit() != 0)
     return call_reject(BOX64_CALL_NOT_READY, "box64_call_desc: engine is not ready");
-  /* A native guest callback can use a raw host pointer without a bridge emu.
-   * Tests that intentionally exercise Box64 bridge state opt in through the
-   * diagnostic environment switch. */
-  if (getenv("BOX64_X64_NATIVE_EMU") && box64_ensure_emu() != 0) {
+  /* Keep a per-thread emu available for Box64 lifecycle and bridge state,
+   * even though the top-level guest entry is direct on x86_64. */
+  if (box64_ensure_emu() != 0) {
     engine_release();
     return call_reject(BOX64_CALL_NO_EMU, "box64_call_desc: no bridge emu");
   }
