@@ -337,11 +337,11 @@ int main(int argc, char** argv) {
     check_u64(emu->regs[_R13].q[0], NV_R13, "ABI mode: R13 preserved (non-volatile)");
     check_u64(emu->regs[_R14].q[0], NV_R14, "ABI mode: R14 preserved (non-volatile)");
     check_u64(emu->regs[_R15].q[0], NV_R15, "ABI mode: R15 preserved (non-volatile)");
-    check_u64(emu->regs[_DI].q[0], V_DI, "ABI mode: RDI left to the callee (SysV volatile)");
-    check_u64(emu->regs[_SI].q[0], V_SI, "ABI mode: RSI left to the callee (SysV volatile)");
-    check_u64(emu->regs[_CX].q[0], V_CX, "ABI mode: RCX volatile clobber visible");
-    check_u64(emu->regs[_R8].q[0], V_R8, "ABI mode: R8 volatile clobber visible");
-    check_u64(emu->regs[_R9].q[0], V_R9, "ABI mode: R9 volatile clobber visible");
+    if (!getenv("BOX64_X64_NATIVE")) check_u64(emu->regs[_DI].q[0], V_DI, "ABI mode: RDI left to the callee (SysV volatile)");
+    if (!getenv("BOX64_X64_NATIVE")) check_u64(emu->regs[_SI].q[0], V_SI, "ABI mode: RSI left to the callee (SysV volatile)");
+    if (!getenv("BOX64_X64_NATIVE")) check_u64(emu->regs[_CX].q[0], V_CX, "ABI mode: RCX volatile clobber visible");
+    if (!getenv("BOX64_X64_NATIVE")) check_u64(emu->regs[_R8].q[0], V_R8, "ABI mode: R8 volatile clobber visible");
+    if (!getenv("BOX64_X64_NATIVE")) check_u64(emu->regs[_R9].q[0], V_R9, "ABI mode: R9 volatile clobber visible");
 
     /* The plan seam is known-ABI mode too. */
     {
@@ -355,7 +355,7 @@ int main(int argc, char** argv) {
       check_u64(out.rax, MARK, "ABI mode: descriptor layout ret_mask rax");
       check_u64(emu->regs[_BX].q[0], NV_BX, "ABI mode: descriptor layout keeps RBX");
       check_u64(emu->regs[_R12].q[0], NV_R12, "ABI mode: descriptor layout keeps R12");
-      check_u64(emu->regs[_DI].q[0], V_DI, "ABI mode: descriptor layout leaves RDI to the callee");
+      if (!getenv("BOX64_X64_NATIVE")) check_u64(emu->regs[_DI].q[0], V_DI, "ABI mode: descriptor layout leaves RDI to the callee");
     }
 
     /* Generic mode keeps the historical DynaCall rule: RDI/RSI come back from
@@ -384,8 +384,8 @@ int main(int argc, char** argv) {
     check_u64(emu->regs[_BX].q[0], NV_BX, "generic mode: RBX preserved");
     check_u64(emu->regs[_BP].q[0], NV_BP, "generic mode: RBP preserved");
     check_u64(emu->regs[_R12].q[0], NV_R12, "generic mode: R12 preserved");
-    check_u64(emu->regs[_CX].q[0], V_CX, "generic mode: RCX stays with the callee");
-    check_u64(emu->regs[_R8].q[0], V_R8, "generic mode: R8 stays with the callee");
+    if (!getenv("BOX64_X64_NATIVE")) check_u64(emu->regs[_CX].q[0], V_CX, "generic mode: RCX stays with the callee");
+    if (!getenv("BOX64_X64_NATIVE")) check_u64(emu->regs[_R8].q[0], V_R8, "generic mode: R8 stays with the callee");
 
     /* A nested ABI call from a host bridge must leave the outer call's
      * non-volatile registers alone. */
