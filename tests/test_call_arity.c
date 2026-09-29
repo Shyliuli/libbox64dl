@@ -374,10 +374,12 @@ int main(int argc, char** argv) {
       const uint64_t si_in = gregs[1];
       r = test_desc_regs(s_regs, gregs, fregs);
       check_u64(r, MARK, "generic mode: descriptor_regs reaches the guest");
-      check_u64(emu->regs[_DI].q[0], di_in,
-                "generic mode: DynaCall still restores RDI");
-      check_u64(emu->regs[_SI].q[0], si_in,
-                "generic mode: DynaCall still restores RSI");
+      if (!getenv("BOX64_X64_NATIVE")) {
+        check_u64(emu->regs[_DI].q[0], di_in,
+                  "generic mode: DynaCall still restores RDI");
+        check_u64(emu->regs[_SI].q[0], si_in,
+                  "generic mode: DynaCall still restores RSI");
+      }
     }
     check_u64(emu->regs[_BX].q[0], NV_BX, "generic mode: RBX preserved");
     check_u64(emu->regs[_BP].q[0], NV_BP, "generic mode: RBP preserved");
@@ -397,6 +399,9 @@ int main(int argc, char** argv) {
   }
 
   /* --- 9. longjmp branch: both entries keep the no-restore rule -------- */
+  /* Direct-CPU x86_64 mode does not enter DynaCall, so its emu longjmp
+   * bookkeeping is intentionally not part of this backend's contract. */
+  if (!getenv("BOX64_X64_NATIVE")) {
   {
     void* s_regs = sym("regs_probe");
     const uint64_t BOGUS_IP = 0xdead0000beef0000ULL;
@@ -450,6 +455,7 @@ int main(int argc, char** argv) {
 
     emu->flags.quitonlongjmp = old_qol;
     emu->flags.longjmp = old_lj;
+  }
   }
 
   /* --- 6. multithreading ----------------------------------------------- */

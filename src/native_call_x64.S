@@ -19,7 +19,15 @@ box64_native_call_x64:
   mov 12(%r13),%ecx
   test %ecx,%ecx
   jz .Lnative_gpr
+  mov %ecx,%edx
   rep movsb
+  mov %edx,%ecx
+  add $15,%ecx
+  and $-16,%ecx
+  sub %edx,%ecx
+  jz .Lnative_gpr
+  xor %eax,%eax
+  rep stosb
 .Lnative_gpr:
   testw $0x3f,4(%r13)
   jz .Lnative_fpr
