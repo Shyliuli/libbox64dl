@@ -372,7 +372,7 @@ $(CLI): cli/box64_main.c $(SHARED)
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -std=c11 -D_GNU_SOURCE -I$(BOX64)/src/include -o $@ \
 		cli/box64_main.c \
-		-L$(dir $(SHARED)) -lbox64dl -Wl,-rpath,'$$ORIGIN/../lib'
+		-L$(dir $(SHARED)) -lbox64dl -Wl,-rpath,'$$ORIGIN/../lib:$$ORIGIN'
 
 # Regression fixture for the unified call entries (include/libbox64.h):
 # a real x86_64 guest .so called through box64_call_simple (via the test callN

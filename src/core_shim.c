@@ -199,6 +199,71 @@ static char* probe_in_path(const char* name) {
   return NULL;
 }
 
+/* Packaged box64 shipped with this engine: next to the engine DSO (flat
+ * layout) or in ../bin (runtime/lib + runtime/bin). NULL when absent. */
+static char* probe_packaged_box64(void) {
+  static const char* const rel[] = {"box64", "../bin/box64"};
+  Dl_info dli;
+  char dso[PATH_MAX], buf[PATH_MAX];
+  char* slash;
+  size_t i;
+  if (!dladdr((void*)probe_packaged_box64, &dli) || !dli.dli_fname) return NULL;
+  if (!realpath(dli.dli_fname, dso)) return NULL;
+  slash = strrchr(dso, '/');
+  if (!slash) return NULL;
+  *slash = 0;
+  for (i = 0; i < sizeof rel / sizeof *rel; ++i)
+    if (snprintf(buf, sizeof buf, "%s/%s", dso, rel[i]) < (int)sizeof buf &&
+        access(buf, X_OK) == 0)
+      return box_realpath(buf, NULL);
+  return NULL;
+}
+
+/* The guest's "own program" is the host process: box64's /proc/self/{exe,
+ * cmdline} wrappers answer from fullpath and argv, so give them the host's
+ * real values (argv[0] = fullpath, as standalone box64 resolves it). */
+static void set_host_program(box64context_t* ctx) {
+  char* args = NULL;
+  size_t len = 0, cap = 0, i;
+  int argc = 0, k;
+  char** argv;
+  FILE* f;
+
+  ctx->fullpath = box_realpath("/proc/self/exe", NULL);
+  if (!ctx->fullpath) ctx->fullpath = box_strdup("/proc/self/exe");
+
+  f = fopen("/proc/self/cmdline", "rb");
+  if (f) {
+    for (;;) {
+      size_t n;
+      if (len + 1 >= cap) {
+        char* p = (char*)box_realloc(args, cap = cap ? cap * 2 : 4096);
+        if (!p) break;
+        args = p;
+      }
+      n = fread(args + len, 1, cap - len - 1, f);
+      if (!n) break;
+      len += n;
+    }
+    fclose(f);
+  }
+  if (args) args[len] = 0;
+  for (i = 0; i < len; ++i)
+    if (!args[i]) ++argc;
+  if (argc < 1) argc = 1;
+
+  argv = (char**)box_calloc(argc + 1, sizeof(char*));
+  if (!argv) return; /* keep NewBox64Context's one-slot argv */
+  argv[0] = box_strdup(ctx->fullpath);
+  for (i = 0, k = 0; args && i < len && k < argc; ++k) {
+    if (k) argv[k] = args + i;
+    i += strlen(args + i) + 1;
+  }
+  box_free(ctx->argv);
+  ctx->argv = argv;
+  ctx->argc = argc;
+}
+
 /* Host executable directory (symlinks resolved); -1 on failure. */
 static int exe_dir(char* out, size_t out_len) {
   ssize_t n = readlink("/proc/self/exe", out, out_len - 1);
@@ -214,9 +279,9 @@ static int exe_dir(char* out, size_t out_len) {
 void box64dl_core_init_guest(void) {
   box64context_t* ctx = my_context;
   if (!ctx) return;
-  /* Placeholders: libbox64dl runs shared objects / .node, not a main program. */
-  ctx->argv[0] = box_strdup("");
-  ctx->fullpath = NULL;
+  /* No guest main program: libbox64dl runs shared objects / .node inside the
+   * host, so the host is the program the guest sees. */
+  set_host_program(ctx);
   ctx->envc = 0;
   ctx->envv = (char**)box_calloc(1, sizeof(char*));
   /* No entry point to inherit: guest exec lands on exit_bridge. */
@@ -224,13 +289,14 @@ void box64dl_core_init_guest(void) {
 
   setup_guest_auxv(ctx);
 
-  /* box64path: setter > $LIBBOX64DL_BOX64PATH > first "box64" in $PATH >
-   * NULL (no guest exec of x86_64 children). */
+  /* box64path: setter > $LIBBOX64DL_BOX64PATH > packaged box64 > first
+   * "box64" in $PATH > NULL (no guest exec of x86_64 children). */
   {
     const char* env = getenv("LIBBOX64DL_BOX64PATH");
     ctx->box64path = s_box64path ? s_box64path
-                                 : (env && *env) ? box_strdup(env)
-                                                 : probe_in_path("box64");
+                     : (env && *env) ? box_strdup(env)
+                                     : probe_packaged_box64();
+    if (!ctx->box64path) ctx->box64path = probe_in_path("box64");
   }
 
   /* orig_argv: a one-slot writable argv. my_prctl(PR_SET_NAME) strcpy's

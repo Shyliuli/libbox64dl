@@ -32,9 +32,10 @@ extern "C" {
  *      know their proven box64, e.g. the very one they already use to run
  *      helper processes;
  *   2. $LIBBOX64DL_BOX64PATH;
- *   3. a search of $PATH for an executable "box64";
- *   4. NULL — previous behaviour: guest exec of x86_64 children stays
- *      unsupported (nothing regresses).
+ *   3. the packaged box64 shipped with the engine: "box64" next to
+ *      libbox64dl.so, or "../bin/box64" from it;
+ *   4. a search of $PATH for an executable "box64";
+ *   5. NULL — guest exec of x86_64 children stays unsupported.
  *
  * Call it before box64_lib_init() to steer the choice at context creation;
  * a call after init also patches the live context immediately. The string
