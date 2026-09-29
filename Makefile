@@ -26,7 +26,7 @@ RUST_TARGET_ARG := $(if $(RUST_TARGET),--target $(RUST_TARGET),)
 RUST_TARGET_SUFFIX := $(if $(RUST_TARGET),-x64,)
 DYNAREC_STATIC := $(wildcard $(BUILD_STATIC)/libdynarec.a)
 DYNAREC_PIC := $(wildcard $(BUILD_PIC)/libdynarec.a)
-NATIVE_RUN_ENV := $(if $(filter ON on 1,$(LIBBOX64_NATIVE_X64)),BOX64_X64_NATIVE=1,)
+NATIVE_RUN_ENV := $(if $(filter ON on 1,$(LIBBOX64_NATIVE_X64)),BOX64_X64_NATIVE=1 BOX64_X64_NATIVE_EMU=1,)
 
 # Ordered patches against the pristine submodule checkout (see patches/).
 PATCHES := $(sort $(wildcard $(ROOT)/patches/*.patch))
