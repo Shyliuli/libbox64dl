@@ -43,6 +43,24 @@ BOX64_API void* box64_dlsym(void* handle, const char* name);
 BOX64_API int box64_dlclose(void* handle);
 BOX64_API const char* box64_dlerror(void);
 
+/*
+ * Point one guest data-symbol GOT slot at a host object.
+ *
+ * `handle` is from box64_dlopen(). `symbol` is the name the guest .so left
+ * undefined (an `extern` global it actually references, so the compiler emitted
+ * R_X86_64_GLOB_DAT or R_X86_64_64). Declare that extern weak in the guest so
+ * load does not report a missing strong symbol. `host` is the address of the
+ * host object.
+ * Every matching slot in that library is rewritten to `host`. Guest code then
+ * reads and writes the host object through the name, with no per-access
+ * trampoline: box64's guest data pointers are process pointers.
+ *
+ * A missing symbol is not a load failure for GLOB_DAT, so call this after
+ * dlopen and before the guest uses the variable. Returns 0 when at least one
+ * slot was written, or -1 with box64_dlerror() set.
+ */
+BOX64_API int box64_export_host(void* handle, const char* symbol, void* host);
+
 /* Unified forward-call entries.  BOX64_CALL_OK means the guest executed;
  * every other status means it did not and output objects must be ignored.
  * A guest longjmp follows the engine's non-local-return rule and does not

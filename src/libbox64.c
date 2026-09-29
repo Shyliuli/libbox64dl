@@ -27,7 +27,11 @@ int unittest(int argc, const char** argv) {
 #include "libbox64_ext.h"
 #include "libbox64_signal.h"
 
+#include <elf.h>
+
 #include "box64context.h"
+#include "elfload_dump.h"
+#include "elfs/elfloader_private.h"
 #include "box64cpu.h"
 #include "elfloader.h"
 #include "library.h"
@@ -555,6 +559,130 @@ BOX64_API int box64_dlclose(void* handle) {
   unlock();
   engine_release();
   return rc;
+}
+
+/* Protection of the mapping holding `addr`, from /proc/self/maps.
+ * 1 = found (*prot set), 0 = unmapped, -1 = maps unreadable. */
+static int export_maps_prot(uintptr_t addr, int* prot) {
+  FILE* f = fopen("/proc/self/maps", "r");
+  char line[512];
+  if (!f) return -1;
+  while (fgets(line, sizeof(line), f)) {
+    unsigned long lo = 0, hi = 0;
+    char perms[8];
+    if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) < 3) continue;
+    if (addr < lo || addr >= hi) continue;
+    fclose(f);
+    *prot = 0;
+    if (perms[0] == 'r') *prot |= PROT_READ;
+    if (perms[1] == 'w') *prot |= PROT_WRITE;
+    if (perms[2] == 'x') *prot |= PROT_EXEC;
+    return 1;
+  }
+  fclose(f);
+  return 0;
+}
+
+/* Release-store a host address into a guest GOT slot. A RELRO page is opened
+ * for the write and restored when its original protection was readable. */
+static int export_slot_store(uintptr_t slot, uintptr_t value) {
+  long ps = sysconf(_SC_PAGESIZE);
+  uintptr_t page;
+  int prot = 0, found, opened = 0;
+
+  if (ps <= 0) ps = 4096;
+  if (slot % sizeof(uintptr_t)) {
+    set_err("box64_export_host: GOT slot is not pointer-aligned");
+    return -1;
+  }
+  page = slot & ~((uintptr_t)ps - 1);
+  found = export_maps_prot(slot, &prot);
+  if (found == 0) {
+    set_err("box64_export_host: GOT slot is not mapped");
+    return -1;
+  }
+  if (found < 0 || !(prot & PROT_WRITE)) {
+    int want = (found == 1 ? prot : PROT_READ) | PROT_WRITE;
+    if (mprotect((void*)page, (size_t)ps, want) != 0) {
+      set_err("box64_export_host: cannot open GOT page");
+      return -1;
+    }
+    opened = 1;
+  }
+  __atomic_store_n((uintptr_t*)slot, value, __ATOMIC_RELEASE);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  if (opened && found == 1)
+    mprotect((void*)page, (size_t)ps, prot);
+  return 0;
+}
+
+BOX64_API int box64_export_host(void* handle, const char* symbol, void* host) {
+  library_t* lib;
+  elfheader_t* head;
+  Elf64_Rela* rela;
+  size_t ent, n, i, patched = 0;
+
+  if (!symbol || !symbol[0] || !host) {
+    set_err("box64_export_host: null symbol or host");
+    return -1;
+  }
+  if (!box64_is_ready()) {
+    set_err("box64_export_host: engine is not ready");
+    return -1;
+  }
+  if (engine_admit() != 0) {
+    set_err("box64_export_host: engine is not ready");
+    return -1;
+  }
+  lock();
+  lib = dl_get_library(handle);
+  if (!lib || lib == (library_t*)-1LL) {
+    unlock();
+    engine_release();
+    set_err("box64_export_host: bad handle");
+    return -1;
+  }
+  head = GetElf(lib);
+  if (!head || !head->rela || !head->DynSym._64 || !head->relasz) {
+    unlock();
+    engine_release();
+    set_err("box64_export_host: library has no ELF data relocations");
+    return -1;
+  }
+  ent = head->relaent > 0 ? (size_t)head->relaent : sizeof(Elf64_Rela);
+  if (ent < sizeof(Elf64_Rela) || head->relasz / ent == 0) {
+    unlock();
+    engine_release();
+    set_err("box64_export_host: bad DT_RELAENT");
+    return -1;
+  }
+  rela = (Elf64_Rela*)(head->rela + head->delta);
+  n = head->relasz / ent;
+  for (i = 0; i < n; ++i) {
+    unsigned type = ELF64_R_TYPE(rela[i].r_info);
+    unsigned symi = ELF64_R_SYM(rela[i].r_info);
+    const char* name;
+    uintptr_t slot;
+    if (type != R_X86_64_GLOB_DAT && type != R_X86_64_64) continue;
+    if (head->numDynSym && symi >= head->numDynSym) continue;
+    name = SymName64(head, &head->DynSym._64[symi]);
+    if (!name || strcmp(name, symbol) != 0) continue;
+    slot = (uintptr_t)rela[i].r_offset + (uintptr_t)head->delta;
+    if (export_slot_store(slot, (uintptr_t)host) != 0) {
+      unlock();
+      engine_release();
+      return -1;
+    }
+    patched++;
+  }
+  unlock();
+  engine_release();
+  if (!patched) {
+    set_err_fmt("box64_export_host: no guest GOT slot for '%s'", symbol);
+    return -1;
+  }
+  set_err(NULL);
+  return 0;
 }
 
 BOX64_API const char* box64_dlerror(void) { return box64_get_error(); }
