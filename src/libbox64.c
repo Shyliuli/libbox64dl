@@ -944,11 +944,21 @@ BOX64_API box64_call_status_t box64_call_simple(
     void* sym, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
     uint64_t a4, uint64_t a5, uint64_t* rax_out) {
   const uint64_t gprs[6] = {a0, a1, a2, a3, a4, a5};
+#ifdef BOX64_X64_NATIVE
+  box64_call_desc_t desc = {0};
+  box64_call_results_t result = {0};
+  box64_call_status_t status;
+  desc.gpr_mask = 0x3f;
+  desc.ret_mask = BOX64_CALL_RET_RAX;
+  desc.gprs = BOX64_PTR_TO_U64(gprs);
+  status = box64_call_desc(sym, &desc, &result);
+#else
   const call_request_t req = {
       0, 0x3F, 0, BOX64_CALL_RET_RAX, 0, 1, gprs, NULL, NULL};
   box64_call_results_t result;
   box64_call_status_t status =
       call_core(sym, &req, &result, "box64_call_simple");
+#endif
   if (status == BOX64_CALL_OK && rax_out) *rax_out = result.rax;
   return status;
 }
