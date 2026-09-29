@@ -126,7 +126,7 @@ CMAKE_PIC := $(CMAKE_COMMON) -DLARCH64_DYNAREC=$(PIC_DYNAREC) \
 
 .PHONY: all static pic patch unpatch vendor check-vendor check-vendor-patches graft prune-stale-grafts plugins plugin-manifest check-plugins check-exports check-exports-negative test test-all test-detach-guest test-reset-stack test-call-arity test-call-plan test-call-fini test-call-unified bench-call-arity test-signal-policy test-signal-route test-guest-signal test-signal-library bench-signal-policy clean distclean rust rust-static \
 	rust-pic cli check-consumer-dso-guest test-fini-races \
-	check-bridge-registration check-bridge-registration-unit bridge-seam-spike
+	check-bridge-registration check-bridge-registration-unit bridge-seam-spike test-x64-native
 
 all: static pic
 
@@ -523,6 +523,16 @@ $(TEST_CALL_FINI): tests/test_call_fini.c $(GUEST_CALL_SO) $(BUILD_STATIC)/libbo
 
 test-call-fini: $(TEST_CALL_FINI)
 	$(TEST_CALL_FINI) $(GUEST_CALL_SO)
+
+# Direct CPU x86_64 regression aggregate. These tests exercise the common
+# descriptor, callback, stack, threading and lifecycle contracts; tests that
+# specifically assert DynaCall signal-frame internals remain in `test`.
+test-x64-native:
+	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-call-arity
+	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-call-plan
+	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-call-unified
+	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-call-fini
+	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-fini-races
 
 # Teardown/admission regression: fini while a call is in flight must refuse and
 # leave the live context alone; a same-thread callback re-entry must nest; a
