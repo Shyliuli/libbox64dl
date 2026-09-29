@@ -26,6 +26,7 @@ RUST_TARGET_ARG := $(if $(RUST_TARGET),--target $(RUST_TARGET),)
 RUST_TARGET_SUFFIX := $(if $(RUST_TARGET),-x64,)
 DYNAREC_STATIC := $(wildcard $(BUILD_STATIC)/libdynarec.a)
 DYNAREC_PIC := $(wildcard $(BUILD_PIC)/libdynarec.a)
+NATIVE_RUN_ENV := $(if $(filter ON on 1,$(LIBBOX64_NATIVE_X64)),BOX64_X64_NATIVE=1,)
 
 # Ordered patches against the pristine submodule checkout (see patches/).
 PATCHES := $(sort $(wildcard $(ROOT)/patches/*.patch))
@@ -459,9 +460,9 @@ $(TEST_CALL_ARITY): tests/test_call_arity.c $(GUEST_CALL_SO) $(BUILD_STATIC)/lib
 
 test-call-arity: $(TEST_CALL_ARITY)
 	@echo "== call-arity: dynarec =="
-	$(TEST_CALL_ARITY) $(GUEST_CALL_SO)
+	$(NATIVE_RUN_ENV) $(TEST_CALL_ARITY) $(GUEST_CALL_SO)
 	@echo "== call-arity: interpreter (BOX64_DYNAREC=0) =="
-	BOX64_DYNAREC=0 $(TEST_CALL_ARITY) $(GUEST_CALL_SO)
+	BOX64_DYNAREC=0 $(NATIVE_RUN_ENV) $(TEST_CALL_ARITY) $(GUEST_CALL_SO)
 
 # Microbenchmark for the call path (old register-file entries vs the
 # fixed-arity fast entries, diagnostics off vs on). Prints ns/call to stderr.
