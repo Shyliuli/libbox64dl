@@ -1014,6 +1014,11 @@ BOX64_API void* box64_callback_with(void* host_fn, void* bridge_fn) {
   BOX64_DIAG("[box64] box64_callback_with host_fn=%p.\n", host_fn);
   if (!box64_is_ready() && box64_lib_init() != 0) return NULL;
   if (!host_fn || !bridge_fn) return NULL;
+#ifdef BOX64_X64_NATIVE
+  /* Guest and host share the SysV x86_64 ABI in this debug flavor, so a
+   * callback needs no INT3 bridge and no emu register-file adapter. */
+  return host_fn;
+#endif
   if (engine_admit() != 0) {
     set_err("box64_callback_with: engine is not ready");
     return NULL;
