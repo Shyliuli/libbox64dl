@@ -2,11 +2,11 @@
 # Regenerate with: tools/verify_box64_patch.sh --write
 # Verify with:     tools/verify_box64_patch.sh --check
 kind = upstream-submodule-patches
-generated_utc = 2026-09-27T03:25:38Z
+generated_utc = 2026-09-28T08:10:02Z
 upstream_remote = https://github.com/ptitSeb/box64.git
 upstream_tag = v0.4.2
 box64_commit = 7eeb5016493dab4e143d53da50dd47bfb44a9509
-patch_count = 18
+patch_count = 19
 patch.1 = 0001-export-openFTrace.patch f5d68fee31063164414964abd827af157253f411c57f5545aac9894184496b7d
 patch.2 = 0002-silent-log-default-unless-env.patch 2ac9e2df10b2c169e2d6ac6e6315de35bb4f6a36854c027b1012a3a91a97a756
 patch.3 = 0003-signal-host-route.patch c664a72c7af02802d079e305df46f008166c3410a4392609dd65e9b62348453c
@@ -25,3 +25,4 @@ patch.15 = 0015-la64-next-linker-frame-sentinel.patch e8a92a9d37a46cb48385172abf
 patch.16 = 0016-printer-plugin-signatures.patch 1d32eea3e806fc05daf08f81697434d1dfd9bce2a3385bc027bb0ddf5b2eb05d
 patch.17 = 0017-interpreter-fpu-exception-flags.patch 85c356c3433bbbd7f889dd1d0185eba425f3c93c5177df21b996be5d33172b70
 patch.18 = 0018-compile-portability-includes.patch 247b6b786268b2cb72e27247c3a8f4c3bc1682ef3669b426d671af7f08de7e80
+patch.19 = 0019-cleanup-thread-safety.patch 72326b8e9be23b6da8e317d24d9b749ebbaabfcb0e9de78648bb468cf853bd90

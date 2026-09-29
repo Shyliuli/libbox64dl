@@ -9,7 +9,7 @@ queue into its worktree and `make graft` links this repository's sources into it
 
 - `box64.lock` — the version lock: submodule commit, upstream tag and every
   patch file's sha256.
-- `0001..0018-*.patch` — the queue, applied in filename order by `make patch`
+- `0001..0019-*.patch` — the queue, applied in filename order by `make patch`
   and reversed by `make unpatch`.
 - `../tools/verify_box64_patch.sh` — verifier (`--check` / `--write`).
 
@@ -41,8 +41,9 @@ make patch                            # apply the queue to vendor/box64
 | `0016-printer-plugin-signatures.patch` | `x64printer` cases for the seven plugin seam signatures |
 | `0017-interpreter-fpu-exception-flags.patch` | interpreter FSQRT sets the x87 C0 flag |
 | `0018-compile-portability-includes.patch` | `signals.h` / `dynablock.c` / `rbtree.c` include fixes |
+| `0019-cleanup-thread-safety.patch` | serialise the atexit / thread-local destructor tables; publish capacity after `box_realloc()` |
 
-Patches `0001..0010` are the embedded-engine/toolkit changes; `0011..0018` are
+Patches `0001..0010` are the embedded-engine/toolkit changes; `0011..0019` are
 build and behaviour fixes against pristine upstream. Each header states its
 rationale.
 
