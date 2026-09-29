@@ -14,7 +14,9 @@ fn main() {
             .map(|v| v == "pic")
             .unwrap_or(false);
     let flavor = if pic { "pic" } else { "static" };
-    let build_dir = if pic {
+    let build_dir = if let Ok(dir) = env::var("LIBBOX64_BUILD_DIR") {
+        PathBuf::from(dir)
+    } else if pic {
         box64.join("build-pic")
     } else {
         box64.join("build")
@@ -38,11 +40,15 @@ fn main() {
     if link_box64 {
         // Make is idempotent and owns patching/grafting/CMake, so build.rs does
         // not reimplement any of it: just ask for the selected flavor.
-        let status = Command::new("make")
-            .arg("-C")
-            .arg(&root)
-            .arg(flavor)
-            .status()
+        let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        let mut make = Command::new("make");
+        make.arg("-C").arg(&root).arg(flavor);
+        if target_arch == "x86_64" {
+            make.env("LIBBOX64DL_ARCH", "x86_64");
+            make.env("CC", "x86_64-linux-gnu-gcc");
+            make.env("CXX", "x86_64-linux-gnu-g++");
+        }
+        let status = make.status()
             .expect("failed to run make for the vendored engine");
         assert!(status.success(), "make {flavor} failed");
     }
@@ -83,8 +89,12 @@ fn main() {
         .include(root.join("src/pt_mutex"))
         .include(root.join("include"))
         .include(box64.join("src/include"))
-        .include(box64.join("src"))
-        .define("LA64", None);
+        .include(box64.join("src"));
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("loongarch64") {
+        cc.define("LA64", None);
+    } else {
+        cc.define("X86_64", None);
+    }
     if pic {
         cc.flag("-fPIC");
     }

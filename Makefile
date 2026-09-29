@@ -16,8 +16,10 @@ BOX64 := $(ROOT)/vendor/box64
 # submodule's HEAD so a moved or uninitialised submodule fails loudly instead of
 # building a different engine than the patch queue was written for.
 BOX64_REF := 7eeb5016493dab4e143d53da50dd47bfb44a9509
-BUILD_STATIC := $(BOX64)/build
-BUILD_PIC := $(BOX64)/build-pic
+LIBBOX64DL_ARCH ?= $(if $(filter x86_64 amd64,$(shell uname -m)),x86_64,loongarch64)
+ARCH_SUFFIX := $(if $(filter x86_64,$(LIBBOX64DL_ARCH)),-x64,)
+BUILD_STATIC := $(BOX64)/build$(ARCH_SUFFIX)
+BUILD_PIC := $(BOX64)/build-pic$(ARCH_SUFFIX)
 NPROC := $(shell nproc)
 
 # Ordered patches against the pristine submodule checkout (see patches/).
@@ -65,9 +67,21 @@ endif
 # runtime wrapped library from a registered descriptor. It is a normal ELFLOADER
 # source (it needs box64's private library/bridge types); the vendored
 # librarian/library.c reaches it through one patch call site.
+# Select the target architecture independently from the build machine.  Set
+# LIBBOX64DL_ARCH=x86_64 when cross-building on LoongArch (or use the native
+# default on an x86_64 host).  The x64-only build is intentionally interpreter
+# first: it is a useful gdb/debug artifact before a native CPU backend exists.
+ifeq ($(LIBBOX64DL_ARCH),x86_64)
+THUNK_ASM := $(ROOT)/src/thunk_x64.S
+ARCH_CMAKE := -DLARCH64=OFF
+else
+THUNK_ASM := $(ROOT)/src/thunk_la64.S
+ARCH_CMAKE := -DLARCH64=ON
+endif
+
 VENDOR_SRC := $(ROOT)/src/diag.c $(ROOT)/src/libbox64.c \
 	$(ROOT)/src/signal_policy.c $(ROOT)/src/signal_route.c \
-	$(ROOT)/src/thunk.c $(ROOT)/src/thunk_la64.S \
+	$(ROOT)/src/thunk.c $(THUNK_ASM) \
 	$(ROOT)/src/native_module.c $(ROOT)/src/native_module_lib.c
 
 # The engine-owned signature module. It is a WRAPPEDS entry (not an ELFLOADER
@@ -78,7 +92,7 @@ VENDOR_SRC := $(ROOT)/src/diag.c $(ROOT)/src/libbox64.c \
 NATIVE_SIG_SRC := $(ROOT)/src/wrappedbox64dnative.c
 NATIVE_SIG_PRIVATE := $(ROOT)/src/wrappedbox64dnative_private.h
 
-CMAKE_COMMON := -DLARCH64=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+CMAKE_COMMON := $(ARCH_CMAKE) -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 	-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
 	-DNOLOADADDR=ON -DNO_CONF_INSTALL=ON -DNO_LIB_INSTALL=ON
 
@@ -156,9 +170,9 @@ test-reset-stack: $(TEST_RESET_STACK)
 # flavor keeps its own cargo target dir so both artifacts can coexist.
 rust: rust-static
 rust-static: $(BUILD_STATIC)/libbox64.a
-	cd rust && CARGO_TARGET_DIR=target/static cargo build
+	cd rust && CARGO_TARGET_DIR=target/static LIBBOX64_BUILD_DIR=$(BUILD_STATIC) cargo build
 rust-pic: $(BUILD_PIC)/libbox64.a
-	cd rust && CARGO_TARGET_DIR=target/pic LIBBOX64_FLAVOR=pic cargo build
+	cd rust && CARGO_TARGET_DIR=target/pic LIBBOX64_FLAVOR=pic LIBBOX64_BUILD_DIR=$(BUILD_PIC) cargo build
 
 # ---- packaged box64 CLI: the runtime/bin/box64 an app tree ships ----
 # Thin main (cli/box64_main.c) over the static engine, linked with the same

@@ -41,8 +41,14 @@
 #include "regs.h"
 #include "x64emu.h"
 
-/* loongarch: glibc spells the PC field __pc (see signal32.c's CONTEXT_PC). */
+/* glibc names the instruction pointer differently by host architecture. */
+#if defined(__loongarch64)
 #define ROUTE_PC(U) ((U)->uc_mcontext.__pc)
+#elif defined(__x86_64__)
+#define ROUTE_PC(U) ((U)->uc_mcontext.gregs[REG_RIP])
+#else
+#define ROUTE_PC(U) ((U)->uc_mcontext.pc)
+#endif
 
 /* patches/0003: the host actions installed BEFORE init_signal_helper took
  * the signals (SIG_DFL/SIG_IGN if the host had none). */
