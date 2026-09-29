@@ -92,7 +92,13 @@ static void host_segv(int sig, siginfo_t* info, void* ucntx) {
    */
   if (info && info->si_code != SI_USER && info->si_code != SI_TKILL &&
       info->si_code != SI_QUEUE) {
+#if defined(__loongarch64)
     void* pc = ucntx ? (void*)((ucontext_t*)ucntx)->uc_mcontext.__pc : NULL;
+#elif defined(__x86_64__)
+    void* pc = ucntx ? (void*)((ucontext_t*)ucntx)->uc_mcontext.gregs[REG_RIP] : NULL;
+#else
+    void* pc = NULL;
+#endif
     fprintf(stderr,
             "[signal-policy] FATAL: hardware fault (code=%d) at pc=%p addr=%p "
             "reached the host handler (wrong route)\n",
