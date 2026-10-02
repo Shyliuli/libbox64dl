@@ -1,132 +1,69 @@
 /*
- * libbox64dl: host-context fault routing for embedded mode.
+ * libbox64dl: retired fault-routing entry point (patches/0020).
  *
- * box64's signal handler routes every fault to the guest's handler when one
- * is registered. In embedded mode that is only correct on threads that carry
- * a live guest thread context: wine's TEB lives at the emu's GS base, and
- * every thread wine created (or the boot executor) has it. A host thread —
- * the JS main thread, libuv workers, anything the host process runs — either
- * has no emu of its own or an ensure_emu one with a zero GS base; emulating
- * the guest's SEH dispatch on such a thread walks garbage and faults again
- * inside the handler, wedging the thread forever (observed as an infinite
- * fault-restart loop; standalone box64 never sees this because all of its
- * threads are its own). Patches/0003 calls box64dl_signal_route() before
- * box64 commits to the guest route, and saves the pre-box64 host actions at
- * init so a genuine host fault reaches the host's own handlers (V8's wasm
- * trap handler among them) instead of the guest's.
+ * This file is a GS-free compatibility shim and nothing else. It exists only
+ * because patches/0003's seam is still referenced out of tree (tests, embedder
+ * glue) and because removing a published symbol is a separate, breaking change.
+ * It does no classification, holds no state, and reads no engine field.
  *
- * This file is grafted into the vendored box64 build (same compile flags),
- * so the emu layout is the real one. Return 1 = handled here, box64 must
- * not touch it further; return 0 = a guest-context fault, box64 proceeds
- * with its own dispatch as before.
+ * WHAT REPLACED IT
+ * ----------------
+ * patches/0003 asked "is this thread a guest?" by testing a segment register: a
+ * wine TEB lives at the emu's GS base, so `emu->segs_offs[_GS] != 0` was read as
+ * "guest context". That misroutes every plain Linux-x64 guest, whose TLS is in
+ * FS and whose GS base is therefore 0: its dynarec-protected JIT faults were
+ * handed to the host action instead of the engine's repairs. The test is gone,
+ * and the engine's SIGSEGV/SIGBUS/SIGILL/SIGABRT entry no longer calls this
+ * function at all, so it can no longer misroute a fault by itself.
  *
- * KNOWN GAP (not fixed here): the guest marker is Wine's TEB (GS base != 0). A
- * plain Linux-x64 guest keeps TLS in FS and leaves GS 0, so its
- * dynarec-protected pages (protectDB/auto-SMC) are currently misrouted to the
- * host action. A fix needs a lock-free, async-signal-safe fault-PC
- * discriminator (the rbtree lookup is not, because nodes can be freed
- * concurrently); none is adopted in this change.
+ * The single decision point is now:
+ *
+ *   src/signal_actions.c  the application signal action module, which owns the
+ *                         four engine signals and decides
+ *                         DEFAULT / IGNORE / NATIVE / GUEST from the real host
+ *                         siginfo_t and ucontext_t and the kernel entry variant;
+ *   src/libtools/signals.c (patches/0020)  box64dl_engine_signal_hook_impl(),
+ *                         which runs the engine's hardware repairs and then
+ *                         calls box64dl_signal_deliver().
+ *
+ * A user-generated signal (si_code <= 0), a hardware fault on a thread without
+ * an emu, and a repairable guest hardware fault are all distinguished there, in
+ * one place. An application's native or guest handler is never preceded by this
+ * function.
+ *
+ * CONTRACT
+ * --------
+ * box64dl_signal_route() reports "not handled here": it returns 0 and does
+ * nothing. It is NOT a forwarder and NOT an alternative entry point. A private
+ * legacy caller that used it must call the real module entry instead -
+ * box64dl_signal_deliver() with the engine-computed values, or, from inside the
+ * engine, box64dl_engine_signal_hook(). Simply returning from a handler does not
+ * make the kernel enter another handler: only the module's own installed
+ * dispatcher performs the application decision. There is deliberately no
+ * forwarding to a native or default action from inside this shim - that would
+ * re-introduce the bypass patches/0020 removed.
  */
 #define _GNU_SOURCE
-#include <dlfcn.h>
-#include <signal.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/syscall.h>
+#include <signal.h>
 #include <ucontext.h>
 
-#include "emu/x64emu_private.h"
-#include "libbox64_signal.h"
-#include "regs.h"
-#include "x64emu.h"
+#include "libbox64_signal_actions.h"
 
-/* glibc names the instruction pointer differently by host architecture. */
-#if defined(__loongarch64)
-#define ROUTE_PC(U) ((U)->uc_mcontext.__pc)
-#elif defined(__x86_64__)
-#define ROUTE_PC(U) ((U)->uc_mcontext.gregs[REG_RIP])
-#else
-#define ROUTE_PC(U) ((U)->uc_mcontext.pc)
+#ifdef __cplusplus
+extern "C" {
 #endif
 
-/* patches/0003: the host actions installed BEFORE init_signal_helper took
- * the signals (SIG_DFL/SIG_IGN if the host had none). */
-extern struct sigaction box64dl_pre_segv, box64dl_pre_bus, box64dl_pre_ill,
-    box64dl_pre_abrt;
-
-/* patches/0003 (threads.c): this thread's own emu, or NULL when the thread
- * never registered one — never fabricates, unlike thread_get_emu(). */
-extern x64emu_t* thread_peek_emu(void);
-
-static struct sigaction* pre_box64(int sig) {
-  switch (sig) {
-    case SIGSEGV: return &box64dl_pre_segv;
-    case SIGBUS: return &box64dl_pre_bus;
-    case SIGILL: return &box64dl_pre_ill;
-    case SIGABRT: return &box64dl_pre_abrt;
-  }
-  return NULL;
-}
-
 int box64dl_signal_route(x64emu_t* emu, int sig, siginfo_t* info, void* ucntx) {
-  struct sigaction* pre;
-  void* pc = ucntx ? (void*)ROUTE_PC((ucontext_t*)ucntx) : NULL;
-
-  /* Resolved once at init from BOX64DL_ROUTE_TRACE (signal_policy.c): a fault
-   * can arrive on any thread at any time, so the signal path must not call
-   * getenv. 0 until publication, which happens before init_signal_helper()
-   * installs the handler that can reach this code. */
-  if (box64dl_route_trace)
-    fprintf(stderr, "[route] sig=%d emu=%p gs=%#lx pc=%p tid=%ld\n", sig,
-            (void*)emu, emu ? (unsigned long)emu->segs_offs[_GS] : 0ul, pc,
-            (long)syscall(SYS_gettid));
-
-  /*
-   * A thread with a wine TEB (GS base set) is inside the guest world: the
-   * guest's own handler — wine's SEH — is the correct route, as before. A
-   * plain Linux-x64 guest thread leaves GS 0 (its TLS is in FS), so its JIT
-   * faults are currently treated as host faults; that gap is documented, not
-   * papered over. The check here stays lookup-free on purpose: no rbtree access
-   * from the signal path.
-   */
-  if (emu && emu->segs_offs[_GS] != 0) return 0;
-
-  pre = pre_box64(sig);
-  if (!pre) return 0;
-
-  /* Say where, before any forwarding — the fault must be diagnosable even
-   * when a host handler takes over (systemd-coredump tends to miss huge
-   * embedded processes). */
-  {
-    Dl_info di;
-    const char* mod = (dladdr(pc, &di) && di.dli_fname) ? di.dli_fname : "?";
-    fprintf(stderr,
-            "[libbox64dl] host fault on thread %ld: sig=%d pc=%p (%s +%#lx) "
-            "addr=%p\n",
-            (long)syscall(SYS_gettid), sig, pc, mod,
-            di.dli_saddr ? (unsigned long)(pc - di.dli_saddr) : 0ul,
-            info ? info->si_addr : NULL);
-  }
-
-  /* Hand the fault to whatever the host had installed before box64: a real
-   * host handler (V8's wasm trap handler chains to its own predecessors)
-   * either recovers or terminates properly. */
-  if ((pre->sa_flags & SA_SIGINFO) &&
-      pre->sa_sigaction && pre->sa_sigaction != (void (*)(int, siginfo_t*, void*))SIG_DFL &&
-      pre->sa_sigaction != (void (*)(int, siginfo_t*, void*))SIG_IGN) {
-    pre->sa_sigaction(sig, info, ucntx);
-    return 1;
-  }
-  if (!(pre->sa_flags & SA_SIGINFO) && pre->sa_handler &&
-      pre->sa_handler != SIG_DFL && pre->sa_handler != SIG_IGN) {
-    pre->sa_handler(sig);
-    return 1;
-  }
-
-  /* No host handler: die loudly with the default disposition instead of
-   * wedging. */
-  signal(sig, SIG_DFL);
-  raise(sig);
-  return 1;
+  (void)emu;
+  (void)sig;
+  (void)info;
+  (void)ucntx;
+  /* Superseded by the application action module's decision, reached from the
+   * engine hook. Never forwards anything itself. */
+  return 0;
 }
+
+#ifdef __cplusplus
+}
+#endif

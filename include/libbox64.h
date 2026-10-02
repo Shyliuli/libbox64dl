@@ -21,6 +21,12 @@ extern "C" {
 #endif
 
 BOX64_API int box64_lib_init(void);
+/* Lifetime contract: the caller must stop new engine operations and wait for
+ * all in-flight calls, callbacks and reentries to finish before calling fini.
+ * Do not race fini with any libbox64dl operation, including on another thread:
+ * the engine does not track active calls or protect teardown with a per-call
+ * lock. Violating this contract is unsupported and may use freed engine state.
+ * A sequential call after fini is refused by the terminal phase check. */
 BOX64_API void box64_lib_fini(void);
 /* Rust owns the engine phase (UNINIT/INITIALIZING/READY/FAILED/FINAL); this is
  * non-zero only in READY. FAILED and FINAL are terminal: a later

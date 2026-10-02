@@ -127,50 +127,13 @@ static void set_err_fmt(const char* fmt, ...) {
  * Rust owns the single phase word (rust/src/phase.rs) and exposes short leaf
  * transitions (box64dl_rust_phase_*). This file calls those leaves and then
  * runs the guest-capable engine work in *C* frames, so a foreign siglongjmp can
- * never skip a live Rust frame or guard. The admission gate is likewise plain C
- * state with explicit admit/release; there is no Rust RAII ticket to skip.
+ * never skip a live Rust frame or guard. The caller must quiesce all guest
+ * calls and callbacks before box64_lib_fini(); the call path has no teardown
+ * admission lock or active-call counter.
  *
  *   box64_lib_init:  begin_init -> engine_boot -> commit_init | fail_init
- *   box64_lib_fini:  begin_close -> quiesce(endBox64) -> commit_close
- *   box64_ensure_emu: admit -> (create emu) -> release
+ *   box64_lib_fini:  begin_close -> endBox64 -> commit_close
  * ------------------------------------------------------------------ */
-
-static pthread_mutex_t g_admit_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int g_admit_closing = 0;
-static unsigned g_admit_inflight = 0;
-
-/* Admit one engine operation. Fails when the phase is not READY or a teardown
- * has begun; the caller must pair success with engine_release(). */
-static int engine_admit(void) {
-  int ok;
-  if (!box64_is_ready()) return -1;
-  pthread_mutex_lock(&g_admit_mutex);
-  ok = !g_admit_closing && box64_is_ready();
-  if (ok) ++g_admit_inflight;
-  pthread_mutex_unlock(&g_admit_mutex);
-  return ok ? 0 : -1;
-}
-
-/* Explicit finish (never an RAII ticket). Runs on the normal-return path; the
- * engine's own siglongjmp target is inside DynaCall, so a signal-driven resume
- * still reaches this call. A host longjmp that abandons the frame leaves the
- * count raised on purpose: box64_lib_fini() then refuses teardown instead of
- * force-freeing a live context. */
-static void engine_release(void) {
-  pthread_mutex_lock(&g_admit_mutex);
-  if (g_admit_inflight) --g_admit_inflight;
-  pthread_mutex_unlock(&g_admit_mutex);
-}
-
-/* Close the gate and report whether calls are still in flight. */
-static int engine_quiesce(void) {
-  int busy;
-  pthread_mutex_lock(&g_admit_mutex);
-  g_admit_closing = 1;
-  busy = g_admit_inflight != 0;
-  pthread_mutex_unlock(&g_admit_mutex);
-  return busy ? -1 : 0;
-}
 
 /* One-shot boot. Runs while the phase is INITIALIZING and with no Rust frame
  * above it. Any failure after the context exists releases it exactly once. */
@@ -236,17 +199,11 @@ BOX64_API int box64_lib_init(void) {
 }
 
 BOX64_API void box64_lib_fini(void) {
-  int busy, freed;
+  int freed;
+  /* Caller contract: no new or in-flight engine operation, including nested
+   * guest calls from a host callback. The phase transition only rejects calls
+   * that BEGIN after it; it cannot make concurrent teardown safe. */
   if (box64dl_rust_phase_begin_close() != 0) return; /* not READY: no-op */
-  busy = engine_quiesce();
-  if (busy) {
-    /* Guest work is still in flight. Publish the terminal state and leave the
-     * context allocated: never free it underneath a running call. */
-    box64dl_rust_phase_commit_close();
-    set_err("box64_lib_fini: refused: guest calls are still in flight; the "
-            "engine is FINAL and unusable, exit the process without reusing it");
-    return;
-  }
   freed = box64dl_core_end(); /* guest fini/destructors; C frame only */
   box64dl_rust_phase_commit_close();
   if (!freed)
@@ -256,23 +213,21 @@ BOX64_API void box64_lib_fini(void) {
 }
 
 /* A per-thread emu with the full 8 MiB stack (thread_get_emu's 256 KiB fallback
- * is too small for recursive guests). Admission-bracketed and phase-checked;
- * the allocation happens in C, not under a Rust lock. */
+ * is too small for recursive guests). The caller serializes this operation
+ * with box64_lib_fini(); phase checks refuse only sequential post-fini calls. */
 BOX64_API int box64_ensure_emu(void) {
   x64emu_t* emu;
-  if (engine_admit() != 0) {
+  if (!box64_is_ready()) {
     set_err("box64: context is not ready");
     return -1;
   }
   emu = thread_peek_emu();
   if (!emu) {
     if (box64dl_core_new_emu() != 0) {
-      engine_release();
       return -1; /* the shim recorded the reason */
     }
     emu = thread_get_emu();
   }
-  engine_release();
   if (!emu) {
     set_err("box64: emu missing after creation");
     return -1;
@@ -460,14 +415,13 @@ BOX64_API void* box64_dlopen(const char* path, int flags) {
     set_err("box64_dlopen: NULL path");
     return NULL;
   }
-  if (engine_admit() != 0) {
+  if (!box64_is_ready()) {
     set_err("box64_dlopen: engine is not ready");
     return NULL;
   }
   lock();
   if (box64_ensure_emu() != 0) {
     unlock();
-    engine_release();
     return NULL;
   }
   emu = thread_get_emu();
@@ -481,7 +435,6 @@ BOX64_API void* box64_dlopen(const char* path, int flags) {
     set_err(NULL);
   }
   unlock();
-  engine_release();
   return handle;
 }
 
@@ -497,14 +450,13 @@ BOX64_API void* box64_dlsym(void* handle, const char* name) {
     set_err("NULL symbol");
     return NULL;
   }
-  if (engine_admit() != 0) {
+  if (!box64_is_ready()) {
     set_err("box64_dlsym: engine is not ready");
     return NULL;
   }
   lock();
   if (box64_ensure_emu() != 0) {
     unlock();
-    engine_release();
     return NULL;
   }
   emu = thread_get_emu();
@@ -516,7 +468,6 @@ BOX64_API void* box64_dlsym(void* handle, const char* name) {
     set_err(NULL);
   }
   unlock();
-  engine_release();
   return p;
 }
 
@@ -526,14 +477,9 @@ BOX64_API int box64_dlclose(void* handle) {
   BOX64_DIAG("[box64] box64_dlclose handle=%p.\n", handle);
   uintptr_t lo = 0, hi = 0;
   if (!box64_is_ready()) return -1;
-  if (engine_admit() != 0) {
-    set_err("box64_dlclose: engine is not ready");
-    return -1;
-  }
   lock();
   if (box64_ensure_emu() != 0) {
     unlock();
-    engine_release();
     return -1;
   }
   emu = thread_get_emu();
@@ -560,7 +506,6 @@ BOX64_API int box64_dlclose(void* handle) {
     box64dl_thunk_release_range(lo, hi);
 
   unlock();
-  engine_release();
   return rc;
 }
 
@@ -633,29 +578,22 @@ BOX64_API int box64_export_host(void* handle, const char* symbol, void* host) {
     set_err("box64_export_host: engine is not ready");
     return -1;
   }
-  if (engine_admit() != 0) {
-    set_err("box64_export_host: engine is not ready");
-    return -1;
-  }
   lock();
   lib = dl_get_library(handle);
   if (!lib || lib == (library_t*)-1LL) {
     unlock();
-    engine_release();
     set_err("box64_export_host: bad handle");
     return -1;
   }
   head = GetElf(lib);
   if (!head || !head->rela || !head->DynSym._64 || !head->relasz) {
     unlock();
-    engine_release();
     set_err("box64_export_host: library has no ELF data relocations");
     return -1;
   }
   ent = head->relaent > 0 ? (size_t)head->relaent : sizeof(Elf64_Rela);
   if (ent < sizeof(Elf64_Rela) || head->relasz / ent == 0) {
     unlock();
-    engine_release();
     set_err("box64_export_host: bad DT_RELAENT");
     return -1;
   }
@@ -673,13 +611,11 @@ BOX64_API int box64_export_host(void* handle, const char* symbol, void* host) {
     slot = (uintptr_t)rela[i].r_offset + (uintptr_t)head->delta;
     if (export_slot_store(slot, (uintptr_t)host) != 0) {
       unlock();
-      engine_release();
       return -1;
     }
     patched++;
   }
   unlock();
-  engine_release();
   if (!patched) {
     set_err_fmt("box64_export_host: no guest GOT slot for '%s'", symbol);
     return -1;
@@ -805,27 +741,23 @@ static box64_call_status_t call_core(void* sym, const call_request_t* req,
       (req->stack_len && !req->stack))
     return call_reject(BOX64_CALL_BAD_ARGUMENT,
                        "box64 call: mask names a NULL value array");
-  /* Admission gate: this is the guest-capable region. The C counter is
-   * explicit (no RAII ticket spans the guest); box64_lib_fini() refuses to tear
-   * the context down while a call is admitted here. */
-  if (engine_admit() != 0)
-    return call_reject(BOX64_CALL_NOT_READY, "box64 call: engine is not ready");
+  /* call_entry checks READY before returning a cached thread emu. Teardown
+   * cannot race this call: the caller must quiesce before box64_lib_fini(). */
   emu = call_entry(who, sym, &status);
-  if (!emu) {
-    engine_release();
-    return status;
-  }
+  if (!emu) return status;
 
   /* Descriptor masks are physical positions: sparse masks never compress the
    * source arrays. Every public descriptor carries complete 16-byte SSE
    * registers, so this constant-width copy is inlined as two register moves
    * instead of a per-register PLT call through a runtime-sized memcpy. */
-  for (i = 0; i < 6; ++i)
-    if (req->gpr_mask & (uint16_t)(1u << i))
-      emu->regs[gpr_pos[i]].q[0] = req->gprs[i];
-  for (i = 0; i < 8; ++i)
-    if (req->fpr_mask & (uint16_t)(1u << i))
-      memcpy(&emu->xmm[i], &req->fprs[i], sizeof(box64_fpr_t));
+  if (req->gpr_mask)
+    for (i = 0; i < 6; ++i)
+      if (req->gpr_mask & (uint16_t)(1u << i))
+        emu->regs[gpr_pos[i]].q[0] = req->gprs[i];
+  if (req->fpr_mask)
+    for (i = 0; i < 8; ++i)
+      if (req->fpr_mask & (uint16_t)(1u << i))
+        memcpy(&emu->xmm[i], &req->fprs[i], sizeof(box64_fpr_t));
 
   /* SysV64 varargs AL: the highest named vector position plus one is the
    * conservative value for sparse physical masks. */
@@ -872,11 +804,7 @@ static box64_call_status_t call_core(void* sym, const call_request_t* req,
 
   /* Explicit status makes a guest RAX of zero unambiguous. Clear the legacy
    * diagnostic slot for callers that still query box64_dlerror(). A successful
-   * DynaCall return is the only path here, so the status is unconditionally OK:
-   * there is no post-call refusal to re-check. engine_release() is the explicit
-   * finish for the admission above; the engine's own siglongjmp target is
-   * inside DynaCall, so it runs on a signal-driven resume too. */
-  engine_release();
+   * DynaCall return is the only path here, so the status is unconditionally OK. */
   set_err(NULL);
   if (out) {
     if (req->ret_mask & BOX64_CALL_RET_RAX) out->rax = R_RAX;
@@ -907,19 +835,17 @@ BOX64_API box64_call_status_t box64_call_desc(
   /* On an x86_64 host the guest ISA is the host ISA.  The debug flavor can
    * therefore enter the loaded image directly, while retaining the normal
    * Box64 loader, wrapped-library registration and lifecycle machinery. */
-  if (engine_admit() != 0)
+  if (!box64_is_ready())
     return call_reject(BOX64_CALL_NOT_READY, "box64_call_desc: engine is not ready");
   /* Keep a per-thread emu available for Box64 lifecycle and bridge state,
    * even though the top-level guest entry is direct on x86_64. */
   if (box64_ensure_emu() != 0) {
-    engine_release();
     return call_reject(BOX64_CALL_NO_EMU, "box64_call_desc: no bridge emu");
   }
   {
     box64_call_results_t local = {0};
     box64_call_results_t *dst = out ? out : &local;
     int rc = box64_native_call_x64(sym, desc, dst);
-    engine_release();
     if (rc != 0)
       return call_reject(BOX64_CALL_ENGINE_REFUSED, "box64_call_desc: native call refused");
     set_err(NULL);
@@ -1051,7 +977,7 @@ BOX64_API void* box64_callback_with(void* host_fn, void* bridge_fn) {
    * registration. */
   return native_callback_thunk(host_fn);
 #endif
-  if (engine_admit() != 0) {
+  if (!box64_is_ready()) {
     set_err("box64_callback_with: engine is not ready");
     return NULL;
   }
@@ -1061,7 +987,6 @@ BOX64_API void* box64_callback_with(void* host_fn, void* bridge_fn) {
   br = AddCheckBridge(my_context->system, (wrapper_t)bridge_fn, host_fn, 0,
                       NULL);
   unlock();
-  engine_release();
   return (void*)(uintptr_t)br;
 }
 
@@ -1096,14 +1021,9 @@ BOX64_API int box64_declare_host_mapping(void* addr, size_t size,
     set_err("box64_declare_host_mapping: not initialized");
     return -1;
   }
-  if (engine_admit() != 0) {
-    set_err("box64_declare_host_mapping: engine is not ready");
-    return -1;
-  }
   lock();
   setProtection((uintptr_t)addr, size, prot);
   unlock();
-  engine_release();
   set_err(NULL);
   return 0;
 }

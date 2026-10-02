@@ -79,7 +79,8 @@ Win64 的 RDI/RSI 是 callee-saved 而 RCX/RDX/R8/R9 易失，与 SysV64 相反�
 ```bash
 make -C libbox64dl test-call-arity   # 定参入口 + 重入回调
 make -C libbox64dl test-call-plan    # descriptor 掩码与结构体摆放
-make -C libbox64dl test-call-fini    # box64_lib_fini() 之后的调用被拒绝
+make -C libbox64dl test-call-fini       # 顺序 fini 之后的调用被拒绝
+make -C libbox64dl test-fini-quiescent  # 工作线程结束后再关闭，保留回调重入
 ```
 
 **终止与 ready 契约。** phase 由 Rust 独占（`rust/src/phase.rs`）：
@@ -87,17 +88,14 @@ make -C libbox64dl test-call-fini    # box64_lib_fini() 之后的调用被拒绝
 Rust 只导出**短叶**迁移原语（`box64dl_rust_phase_*`：拿锁、改状态、发布、返回），
 编排放到 C（`src/libbox64.c`）：`box64_lib_init` 先 `begin_init` 再在 C 帧里 boot；
 `box64_lib_fini` 先发布 `CLOSING` 再调 box64 自己的 `endBox64()`（guest fini/destructor
-都在 C 帧，Rust 锁与 Rust 帧都不跨 guest）。C 侧还有显式准入计数
-（`engine_admit`/`engine_release`，**不是** Rust RAII 票据，foreign longjmp 不会跳过
-Drop）：有 guest 调用在飞时 `box64_lib_fini()` **拒绝**并发布终态 `FINAL`，
-**不**强 free 活 context，错误槽要求进程退出；此后所有入口（含 cached-emu 快路径）
-先查 phase 再拒绝。`box64_is_ready()` 只读 phase。`FAILED`/`FINAL` 都是终态：此后
-`box64_lib_init()` 被显式拒绝并给出原因，`box64_dlopen()` 干净失败并置错误。
-Rust **不会**自己 free context（`Engine` 没有 freeing `Drop`），所以不可能二次释放；
-init 中途失败走 shim 的单独 free 路径并记 FAILED。`my_context` 是 box64 自己的全局，
-不是状态源。`tests/test_call_fini.c`、`tests/test_fini_race.c` 与
-`tests/consumer_smoke.c` 钉住这条契约；完整所有权/双重释放审计见
-[`docs/engine-ownership.md`](docs/engine-ownership.md)。
+都在 C 帧，Rust 锁与 Rust 帧都不跨 guest）。调用方负责在 `box64_lib_fini()` 前停止新调用，
+等待所有正在执行的调用与回调结束；与任何引擎操作并发执行 `fini` 不受支持。
+热路径没有准入互斥锁或调用计数，ready 检查只保证顺序关闭后的调用被拒绝，
+不保证并发关闭安全。`FAILED`/`FINAL` 都是终态：此后 `box64_lib_init()` 被显式拒绝
+并给出原因，`box64_dlopen()` 干净失败并置错误。Rust **不会**自己 free context
+（`Engine` 没有 freeing `Drop`）；init 中途失败走 shim 的单独 free 路径并记 FAILED。
+`my_context` 是 box64 自己的全局，不是状态源。`tests/test_call_fini.c`、
+`tests/test_fini_quiescent.c` 与 `tests/consumer_smoke.c` 钉住顺序生命周期契约。
 
 ## 从 guest 状态回到 host（Wine detach 安全）
 
@@ -337,52 +335,54 @@ BOX64DL_SIGNAL_LIBRARY_RULES='libspecial.so=compat' \
   ./your-app
 ```
 
-## fault 路由（src/signal_route.c）
+## 进程级 signal action（`include/libbox64_signal_actions.h`）
 
-与掩码策略分开的一件事：先决定 fault 归不归 box64。当前实现只有一条判定：
+一个 host signal 只有**一个当前 action**：宿主与 guest 读写同一个值（guest 走
+`rt_sigaction`，宿主走下面两个入口），**后注册者生效**，不是两侧隔离。
 
-- Wine guest 线程（GS base≠0，TEB）→ guest。
-- 其余 → 转发给 init 前的 host action（V8 等）；没有 host action 就带诊断按默认
-  处置退出。
+```c
+#include "libbox64_signal_actions.h"
 
-这条路径不查表、不读取环境变量，也不依赖任何未应用的外部 patch。
+box64_signal_action_t act;
+box64_signal_action_get(SIGUSR1, &act);              /* 读当前 action */
+box64_signal_action_set_native(SIGUSR1, &sa, &old);  /* 装一个 native action */
+```
 
-回归：`make test-signal-route`（真信号：host raise 归 host、bridge 回调 host fault
-仍归 host）。
+`kind` 是 `DEFAULT`/`IGNORE`/`NATIVE`/`GUEST`：`NATIVE` 是 native C 函数，`GUEST` 是
+guest 地址、**不能当 native 函数调用**。域是 `1..31` 与 `34..64`，32/33 一律
+`ENOTSUP`（绝不碰 C 库内部 handler）；`SIGKILL`/`SIGSTOP` 可查询、设置返回 `EINVAL`。
+
+**约束和它的理由写在代码里**：errno 契约、`get()` 的 async-signal-safe 边界（有界屏蔽
+窗口，不是纯原子读）、`set_native()` 不保证 async-signal-safe、投递的 repair-first
+顺序、one-shot 与 fatal `DEFAULT` 语义、两种栈域、`fini` 要求调用方先静默——见
+`include/libbox64_signal_actions.h`、`src/signal_actions.c`、`src/signal_guest.c` 与
+`patches/0020`/`0021` 的注释。完整设计与证据（含未主张的边界）见
+[`docs/signal-actions.md`](docs/signal-actions.md)。
+
+旧的 GS 判定已整条删除：`src/signal_route.c` 只剩一个不做分类、返回 0 的 shim（它不在
+`src/libbox64dl.map` 里，拿 DSO 的消费者解析不到它），回归是 `make test-signal-route`。
+
+```bash
+make test-signal-action-unit   # 纯 host 单元测试
+make test-signal-actions       # 真引擎矩阵：22 case / 39 行 → 76 个进程
+```
 
 ## 对 vendored box64 的改动面
 
-引擎是**上游** box64 仓库的 git submodule `vendor/box64`，锁在 tag `v0.4.2`
+引擎是上游 box64 的 git submodule `vendor/box64`，锁在 tag `v0.4.2`
 （commit `7eeb5016493dab4e143d53da50dd47bfb44a9509`）。本仓不在 submodule 里提交任何
-东西：`make patch` 把 `patches/0001`–`0018` 按序打进它的工作树，`make graft` 再把本仓
-的源软链进去，构建落在 `vendor/box64/build{,-pic}`。所以 submodule 工作树**预期是脏的**
-（`.gitmodules` 用 `ignore = untracked` 只隐藏它的 build/graft/生成物，指针本身仍可见）。
-
-队列里与嵌入直接相关的改动：
-
-1. `0012`：`src/library_list.h` 末尾 `#include "library_list_extra.h"`
-2. `0011`：`CMakeLists.txt` 里 `include("${BOX64_ROOT}/box64dl_core.cmake" OPTIONAL)`
-   与 `include("${BOX64_ROOT}/box64dl_plugins.cmake" OPTIONAL)`
-3. `0010`：`src/librarian/library.c` 加一行 include，
-   把 `initWrappedLib()` 改成三态返回（0=不是我们的 soname，>0=已构建，<0=被
-   descriptor 认领但构建失败），并在它的两个调用点处理失败：认领后失败必须
-   中止本次加载（不落到 emulated 路径、不加载同名 x86_64 客体、不留半初始化
-   LIB_WRAPPED），让 `box64_dlopen()` 返回 NULL。seam 逻辑全在引擎自己的
-   `src/native_module_lib.c`
-
-`0011` 还包含 `libbox64` STATIC target、`main.c`/`test.c` 的 `BOX64_MAIN_SRC` 拆分与
-`-rdynamic`；`0013`–`0018` 是相对上游的行为修正（x87 tag word/FXSAVE、LA64 FSQRT
-标志与未对齐 16 位原子、LinkNext 帧标记、printer 签名、解释器 FSQRT、include 可移植性）。
-每条的动机见 patch 头。
-
-验证整条链（submodule commit、patch 哈希、干净上游可应用、工作树无漂移）：
+东西，构建流程是：
 
 ```bash
-tools/verify_box64_patch.sh --check
+make vendor                         # 初始化并校验 submodule
+make patch                          # 把 patches/ 按文件名顺序打进 vendor/box64
+make graft                          # 把本仓的源软链进工作树
+tools/verify_box64_patch.sh --check # 重新应用到 pristine 导出，与工作树逐字节比对
 ```
 
-补丁明细见 [`patches/README.md`](patches/README.md)；上游来源与锁定见
-[`docs/vendor-provenance.md`](docs/vendor-provenance.md)。
+submodule 工作树**预期是脏的**：`.gitmodules` 用 `ignore = untracked` 只隐藏它的
+build/graft/生成物，指针本身仍可见。每条补丁的用途见
+[`patches/README.md`](patches/README.md)。
 
 ## 嵌入时的三个坑
 
@@ -406,8 +406,7 @@ MIT，见 [`LICENSE`](LICENSE)。
 
 `vendor/box64/` 是 [box64](https://github.com/ptitSeb/box64) 的上游 git submodule
 （tag `v0.4.2`，commit `7eeb5016493dab4e143d53da50dd47bfb44a9509`），同为 MIT，版权归
-ptitSeb（见该目录下的 `LICENSE`）。本仓库对它的本地改动是 `patches/0001`–`0018` 的编号
-补丁；除此之外只有 submodule 工作树里的 graft 软链、生成物与构建目录，都不提交。来源、
-上游 commit 与队列明细见
-[`docs/vendor-provenance.md`](docs/vendor-provenance.md) 与
+ptitSeb（见该目录下的 `LICENSE`）。本仓库对它的本地改动是 `patches/0001`–`0021` 的编号
+补丁；除此之外只有 submodule 工作树
+里的 graft 软链、生成物与构建目录，都不提交。队列明细见
 [`patches/README.md`](patches/README.md)。

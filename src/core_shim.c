@@ -26,6 +26,10 @@
 #include "env.h"
 #include "hostext.h"
 #include "libbox64_signal.h"
+/* The process-wide signal-action dispatcher (src/signal_actions.c). Its install
+ * is owned by the engine's init_signal_helper (patches/0020); the shim only
+ * reads whether that install succeeded. See box64dl_core_context_new(). */
+#include "libbox64_signal_actions.h"
 #include "os.h"
 #include "pathcoll.h"
 #include "regs.h"
@@ -95,13 +99,43 @@ const char* box64dl_core_signal_policy_refusal(void) {
 /* ------------------------------------------------------------------ */
 /* context lifecycle                                                   */
 
+/* The signal-action module's liveness probe (src/signal_actions.c). Declared
+ * WEAK on purpose: the module is grafted into the engine only once the patch
+ * queue carries its engine half (patches/0020/0021), and until then this object
+ * — which the Rust crate compiles into liblibbox64.a — must still link without
+ * pulling in a definition that does not exist yet. A weak undefined reference
+ * resolves to NULL in that window, which box64dl_core_context_new() reads as
+ * "this build has no signal-action module" and skips the gate for. Once
+ * src/signal_actions.c IS an ELFLOADER source, the definition is in the same
+ * link and the gate is live. */
+extern int box64dl_signal_actions_active(void) __attribute__((weak));
+
 int box64dl_core_context_new(void) {
   /* Embedded context: argc = 1 (we run shared objects, not a main program).
    * NewBox64Context installs the four box64 signal handlers via
    * init_signal_helper; FreeBox64Context restores the pre-box64 host actions
    * again (patches 0003/0006). */
   my_context = NewBox64Context(1);
-  return my_context ? 0 : -1;
+  if (!my_context) return -1;
+
+  /* The signal-action dispatcher installs itself from inside
+   * init_signal_helper (patches/0020), i.e. during NewBox64Context above, and
+   * that install is TRANSACTIONAL: it reports success only when all four
+   * engine signals (SIGSEGV/SIGBUS/SIGILL/SIGABRT) were captured and
+   * re-dispatched, and rolls every partial install back otherwise
+   * (src/signal_actions.c). The outcome is observable only after the context
+   * exists, so it is checked here, and STARTUP IS GATED ON IT: an inactive
+   * module reports ENOSYS from every action entry point, leaving the process
+   * with a half-installed fatal-signal route. Fail loudly instead and release
+   * the context exactly once — the caller does not free it on this path. */
+  if (box64dl_signal_actions_active && !box64dl_signal_actions_active()) {
+    box64_set_err("box64: the signal-action dispatcher could not be installed "
+                  "(init_signal_helper's transactional install refused, so the "
+                  "engine's fatal-signal route would be half-installed)");
+    FreeBox64Context(&my_context);
+    return -1;
+  }
+  return 0;
 }
 
 int box64dl_core_rebind(const void* box64_fn) {

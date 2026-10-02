@@ -59,11 +59,9 @@ Local engine changes are the numbered patches in `patches/` only:
 | `0018` | `signals.h` / `dynablock.c` / `rbtree.c` include portability |
 
 Each patch header states its own rationale and scope. `patches/README.md`
-describes the queue and the changes it deliberately does **not** carry; the
-version lock is `patches/box64.lock`.
+describes the queue and the changes it deliberately does **not** carry.
 
-Verify the submodule commit, the patch hashes, a pristine apply and the live
-worktree in one shot:
+Verify the submodule commit, a pristine apply and the live worktree in one shot:
 
 ```sh
 tools/verify_box64_patch.sh --check

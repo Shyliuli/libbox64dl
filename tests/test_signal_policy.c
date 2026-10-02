@@ -407,7 +407,13 @@ int main(int argc, char** argv) {
             (expect_fast ? BOX64_SIGNAL_POLICY_FAST : BOX64_SIGNAL_POLICY_COMPAT),
         "published policy matches the selection");
 
-  /* Handler precedence + the property FAST relies on. */
+  /* Handler precedence + the kernel-layout property the action module relies on.
+   * The entry is SIGINFO-shaped; the delivered self-block is the LOGICAL
+   * SA_NODEFER: the module does NOT force SA_NODEFER onto the kernel action
+   * (include/libbox64_signal_actions.h), it relies on the kernel's automatic self-block
+   * and computes the application mask itself. So the kernel flags must NOT carry
+   * SA_NODEFER, and the kernel mask must stay empty (the app mask is applied on
+   * the immutable snapshot, not by the kernel). */
   {
     struct sigaction cur;
     memset(&cur, 0, sizeof(cur));
@@ -415,8 +421,9 @@ int main(int argc, char** argv) {
     check(cur.sa_sigaction != host_segv && cur.sa_sigaction != 0,
           "box64 owns SIGSEGV after init");
     check((cur.sa_flags & SA_SIGINFO) != 0, "box64 handler is SA_SIGINFO");
-    check((cur.sa_flags & SA_NODEFER) != 0,
-          "box64 handler is SA_NODEFER (entry does not block the signal)");
+    check((cur.sa_flags & SA_NODEFER) == 0,
+          "box64 kernel entry does not force SA_NODEFER (self-block is the "
+          "module's logical decision)");
     check(sigismember(&cur.sa_mask, SIGSEGV) == 0,
           "box64 sa_mask does not block the delivered signal");
   }

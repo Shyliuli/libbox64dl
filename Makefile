@@ -91,8 +91,80 @@ THUNK_ASM := $(ROOT)/src/thunk_la64.S
 ARCH_CMAKE := -DLARCH64=ON
 endif
 
+# The process-wide signal-action pair (include/libbox64_signal_actions.h):
+#
+#   src/signal_actions.c  the action table, the four static kernel entries and
+#       the public getter/setter. It includes NO engine header on purpose (the
+#       engine-side seam is two symbols), so the same translation unit is also
+#       buildable and runnable standalone — tests/test_signal_action_unit.c.
+#   src/signal_guest.c    the guest worker: the guest-side lookup and handler
+#       invocation the module hands a GUEST delivery to (patches/0021).
+#
+# Both are ELFLOADER sources, so they land in build{,-pic}/libbox64.a and the
+# static test binaries and the shipped DSO get them with no extra link flag.
+#
+# GRAFT GATE. The module's engine half is the patch queue:
+# patches/0020-signal-action-engine.patch installs the dispatcher from
+# init_signal_helper and defines box64dl_engine_signal_hook;
+# patches/0021-signal-guest-actions.patch wires the guest registration/query
+# path and provides the guest-side worker the module hands a GUEST delivery to.
+# Until BOTH are in the queue the module's engine-half symbols do not resolve,
+# and the DSO link is `-Wl,-z,defs`, so grafting src/signal_actions.c early
+# would break every shared-library gate for an unrelated reason.
+#
+# The gate therefore requires, all at once:
+#   * EXACTLY ONE patches/0020*.patch, and
+#   * EXACTLY ONE patches/0021*.patch, and
+#   * both sources exist — src/signal_actions.c AND src/signal_guest.c.
+#
+# Counting per number, not the combined word count, is deliberate. The two
+# patches are the two halves of one contract (0020 can name 0021's symbol and
+# vice versa), so the gate must see one of each; a single prefix-count would
+# also open on, say, two 0020 files and no 0021, or on a stray
+# `0020-*.patch.bak`. Each wildcard is therefore counted on its own, and the
+# combined list is kept only as the target's prerequisite name.
+#
+# The source half is not redundant. The patches compile the sources the gate
+# would have grafted, so a queue that names 0020/0021 while one source has not
+# landed yet would make CMake reference a missing file (or, with a wildcard,
+# silently leave the module half-linked). Requiring the sources keeps the graft
+# and the queue in step.
+#
+# WHAT A CLOSED GATE MEANS. The gate is all-or-nothing on artifacts and it only
+# controls THIS build file: whether the module is grafted and whether the matrix
+# target is in the default `test` set. It does NOT make any partial queue safe
+# or validated. A partial configuration is NOT a supported layout — with the
+# gate closed the honest statement is only "the matrix target is omitted from
+# the default suite and the module is not grafted", not "a tree with one of the
+# two patches works". Only the full feature (both patches AND both sources) is
+# the intended configuration, and it opens by itself on the next `make`.
+#
+# The patch files and both sources are present in the tree, so this gate is OPEN,
+# and the feature is not artifact-only any more: the queue was applied and
+# reversed in a real live cycle and the new engine is built from that queue — the
+# matrix below runs on it.
+SIGNAL_ACTIONS_PATCH_0020 := $(wildcard $(ROOT)/patches/0020*.patch)
+SIGNAL_ACTIONS_PATCH_0021 := $(wildcard $(ROOT)/patches/0021*.patch)
+SIGNAL_ACTIONS_PATCHES := $(SIGNAL_ACTIONS_PATCH_0020) $(SIGNAL_ACTIONS_PATCH_0021)
+SIGNAL_ACTIONS_SOURCES := $(wildcard $(ROOT)/src/signal_actions.c) \
+	$(wildcard $(ROOT)/src/signal_guest.c)
+SIGNAL_ACTIONS_READY := $(if $(filter 1,$(words $(SIGNAL_ACTIONS_PATCH_0020))),$(if $(filter 1,$(words $(SIGNAL_ACTIONS_PATCH_0021))),$(if $(filter 2,$(words $(SIGNAL_ACTIONS_SOURCES))),yes,)))
+SIGNAL_ACTIONS_SRC := $(if $(SIGNAL_ACTIONS_READY),$(SIGNAL_ACTIONS_SOURCES))
+
+# Conditional default-suite entry. When the gate is open, `make test` must
+# actually exercise the feature, so the real-engine matrix joins the default
+# regression. When it is closed the variable expands to nothing, so the matrix
+# target is simply omitted from `test` and that recipe never runs. This is a
+# statement about target membership only: it is NOT a claim that a tree with a
+# partial queue builds or passes, and the default suite passing on such a tree is
+# not asserted anywhere. This is the only conditional entry in `test`; no recipe
+# is duplicated and no existing test is removed. (Named distinctly from
+# TEST_SIGNAL_ACTIONS, which is the built binary path further down.)
+SIGNAL_ACTIONS_TEST_TARGET := $(if $(SIGNAL_ACTIONS_READY),test-signal-actions)
+
 VENDOR_SRC := $(ROOT)/src/diag.c $(ROOT)/src/libbox64.c \
 	$(ROOT)/src/signal_policy.c $(ROOT)/src/signal_route.c \
+	$(SIGNAL_ACTIONS_SRC) \
 	$(ROOT)/src/thunk.c $(THUNK_ASM) $(NATIVE_CALL_SRC) \
 	$(ROOT)/src/native_module.c $(ROOT)/src/native_module_lib.c
 
@@ -125,8 +197,9 @@ CMAKE_PIC := $(CMAKE_COMMON) -DLARCH64_DYNAREC=$(PIC_DYNAREC) \
 	-DCMAKE_ASM_FLAGS="-fPIC"
 
 .PHONY: all static pic patch unpatch vendor check-vendor check-vendor-patches graft prune-stale-grafts plugins plugin-manifest check-plugins check-exports check-exports-negative test test-all test-detach-guest test-reset-stack test-call-arity test-call-plan test-call-fini test-call-unified bench-call-arity test-signal-policy test-signal-route test-guest-signal test-signal-library bench-signal-policy clean distclean rust rust-static \
-	rust-pic cli check-consumer-dso-guest test-fini-races \
-	check-bridge-registration check-bridge-registration-unit bridge-seam-spike test-x64-native
+	rust-pic cli check-consumer-dso-guest test-fini-quiescent \
+	check-bridge-registration check-bridge-registration-unit bridge-seam-spike test-x64-native \
+	test-signal-actions test-signal-action-unit
 
 all: static pic
 
@@ -136,7 +209,16 @@ all: static pic
 # The thunk pool is self-contained, so it tests without building box64.
 # The export gate and its negative injection check are part of the default
 # single-project gate; they check libbox64dl's own export table only.
-test: build/test_thunk test-detach-guest test-reset-stack test-call-arity test-call-plan test-call-fini test-fini-races test-call-unified test-signal-policy test-signal-route test-guest-signal test-signal-library check-bridge-registration check-exports check-exports-negative check-no-node check-linkage check-engine-instances pkgconfig check-consumer check-consumer-dso-guest
+#
+# $(SIGNAL_ACTIONS_TEST_TARGET) is `test-signal-actions` ONLY when
+# SIGNAL_ACTIONS_READY is yes (both patches and both sources present) and empty
+# otherwise, so the real-engine signal-action matrix is part of the full
+# regression exactly when the feature is actually in the build. When the gate is
+# closed the matrix target is simply omitted from this list; that is a target-
+# membership statement, not a claim about what a partial-queue tree can build or
+# pass. The standalone `test-signal-action-unit` is unconditional: it needs
+# neither patch, engine build nor guest fixture.
+test: build/test_thunk test-detach-guest test-reset-stack test-call-arity test-call-plan test-call-fini test-fini-quiescent test-call-unified test-signal-policy test-signal-route test-guest-signal test-signal-library test-signal-action-unit $(SIGNAL_ACTIONS_TEST_TARGET) check-bridge-registration check-exports check-exports-negative check-no-node check-linkage check-engine-instances pkgconfig check-consumer check-consumer-dso-guest
 	./build/test_thunk
 
 # Complete regression-suite alias. There are no tests with extra Wine/display
@@ -273,8 +355,14 @@ shared: $(SHARED)
 # Public ABI gate: the engine DSO is the shipped export table. The gate is
 # self-contained: it never looks at another repository, so an engine-only build
 # can run it (tools/check_no_node.sh proves that separately).
+#
+# --expect-signal-actions is passed exactly when the build grafted
+# src/signal_actions.c (see SIGNAL_ACTIONS_READY): then the two public
+# signal-action entries must be dynamic, or the feature is unreachable from the
+# shipped DSO. The default gate is unchanged for a build without the module.
 check-exports: $(SHARED)
-	python3 tools/check_exports.py --box64 $(SHARED)
+	python3 tools/check_exports.py --box64 $(SHARED) \
+		$(if $(SIGNAL_ACTIONS_READY),--expect-signal-actions)
 
 # Negative gate for the symbol check itself: every retired forward-call entry
 # (and a Node-side name) injected into the observed set must be rejected. This
@@ -284,7 +372,7 @@ check-exports: $(SHARED)
 check-exports-negative: $(SHARED)
 	@set -e; \
 	fail=0; \
-	for sym in box64_call_regs box64_call_marshaled box64_call_plan box64_call0 box64_lib_ready napi_create_function my_napi_create box64dl_core_boot_env _ZN5alloc3vec; do \
+	for sym in box64_call_regs box64_call_marshaled box64_call_plan box64_call0 box64_lib_ready napi_create_function my_napi_create box64dl_core_boot_env box64dl_signal_action_get box64dl_signal_actions_init box64dl_signal_guest_deliver box64dl_engine_signal_hook _ZN5alloc3vec; do \
 		if python3 tools/check_exports.py --box64 $(SHARED) --inject-symbol "$$sym" \
 			>/dev/null 2>&1; then \
 			echo "symbol-gate negative: FAIL: injected $$sym was accepted" >&2; \
@@ -532,23 +620,22 @@ test-x64-native:
 	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-call-plan
 	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-call-unified
 	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-call-fini
-	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-fini-races
+	$(MAKE) LIBBOX64DL_ARCH=x86_64 LIBBOX64_NATIVE_X64=ON test-fini-quiescent
 
-# Teardown/admission regression: fini while a call is in flight must refuse and
-# leave the live context alone; a same-thread callback re-entry must nest; a
-# post-refusal call must fail at admission. See tests/test_fini_race.c.
-TEST_FINI_RACE := $(ROOT)/build/test_fini_race
+# Sequential teardown regression: finish the worker's guest call and callback
+# reentry, then fini; later calls must be refused by the terminal phase.
+TEST_FINI_QUIESCENT := $(ROOT)/build/test_fini_quiescent
 
-$(TEST_FINI_RACE): tests/test_fini_race.c $(GUEST_CALL_SO) $(BUILD_STATIC)/libbox64.a
+$(TEST_FINI_QUIESCENT): tests/test_fini_quiescent.c $(GUEST_CALL_SO) $(BUILD_STATIC)/libbox64.a
 	@mkdir -p $(dir $@)
 	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
-		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_fini_race.c \
+		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_fini_quiescent.c \
 		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
 		-Wl,--no-whole-archive $(RUST_STATIC) \
 		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
 
-test-fini-races: $(TEST_FINI_RACE)
-	$(TEST_FINI_RACE) $(GUEST_CALL_SO)
+test-fini-quiescent: $(TEST_FINI_QUIESCENT)
+	$(TEST_FINI_QUIESCENT) $(GUEST_CALL_SO)
 
 # Signal-policy regression (patches/0005): the per-call signal-mask syscall,
 # the per-frame mixed-mode restore and the policy selection, driven by REAL
@@ -600,11 +687,15 @@ test-signal-policy: $(TEST_SIGNAL_POLICY)
 	BOX64DL_SIGNAL_POLICY=bogus $(TEST_SIGNAL_POLICY) $(GUEST_CALL_SO) env-bogus
 	$(TEST_SIGNAL_POLICY) $(GUEST_CALL_SO) set-bad
 
-# Fault-routing regression (src/signal_route.c): which faults box64 claims and
-# which reach the pre-box64 host action. Separate concern from the mask policy;
-# driven by real signals (host raise, host fault inside a bridge callback). A
-# plain GS=0 Linux guest's JIT fault is a documented known gap and has no fake
-# fixture here.
+# Fault-routing regression (src/signal_route.c). SEPARATE concern from the mask
+# policy; driven by real signals (host raise, host fault inside a bridge
+# callback). NOTE: src/signal_route.c is now the retired GS-free compatibility
+# shim — it returns 0 and classifies nothing — and patches/0020 removes the call
+# site from my_box64signalhandler(). This target is kept as the host-side
+# regression for the pre-0020 forwarded path; engine-signal delivery is decided
+# by the action module and covered by test-signal-actions. Whether these host-
+# side expectations still hold once 0020 is applied is a 0020/acceptance
+# question, not something asserted here.
 TEST_SIGNAL_ROUTE := $(ROOT)/build/test_signal_route
 
 $(TEST_SIGNAL_ROUTE): tests/test_signal_route.c $(GUEST_CALL_SO) $(BUILD_STATIC)/libbox64.a
@@ -690,6 +781,124 @@ test-signal-library: $(TEST_SIGNAL_LIBRARY)
 	$(TEST_SIGNAL_LIBRARY) $(GUEST_CALL_SO) $(GUEST_SIG2_SO) mixed
 	BOX64_DYNAREC=0 $(TEST_SIGNAL_LIBRARY) $(GUEST_CALL_SO) $(GUEST_SIG2_SO) mixed
 
+# ---- process-wide signal actions (include/libbox64_signal_actions.h) ----
+# One logical action per host signal, shared by the native host and the guest:
+# the app's pre-init native disposition is the initial value, a guest
+# rt_sigaction(2) replaces it, box64_signal_action_set_native() replaces it
+# again, and either side reads the other's action back with
+# box64_signal_action_get(). See include/libbox64_signal_actions.h.
+#
+# Two build layers, deliberately separated:
+#
+#   test-signal-action-unit   the core module on its own. src/signal_actions.c
+#       includes no engine header; it reaches the engine through exactly two
+#       symbols, which the test defines as doubles (plus -Wl,--wrap=sigaction to
+#       watch the kernel dispositions it installs). No patch apply, no engine
+#       build, no guest fixture and no third stub dependency, so it runs both
+#       before and after the engine half lands. 15/15; it is part of `make test`.
+#
+#   test-signal-actions       the real engine. It needs src/signal_actions.c
+#       grafted into build/libbox64.a, which needs BOTH patches/0020 (init
+#       install + engine hook) and patches/0021 (guest worker). Gated on them:
+#       before they exist the target reports what is missing instead of a link
+#       error about two unresolved symbols.
+GUEST_SIGNAL_ACTIONS_SO := $(ROOT)/build/guest/libsignal_actions_guest.so
+
+# The fixture is a freestanding x86_64 image: its own syscall stubs and its own
+# memcpy/memset, so -fno-builtin -ffreestanding are load-bearing. Without them
+# GCC is free to emit a call to libc's memcpy from those very functions, which
+# leaves an undefined symbol in a -nostdlib image.
+$(GUEST_SIGNAL_ACTIONS_SO): tests/guest/signal_actions_guest.c
+	@mkdir -p $(dir $@)
+	x86_64-linux-gnu-gcc -shared -fPIC -O1 -nostdlib -fno-stack-protector \
+		-fno-builtin -ffreestanding -Wall -Wextra -o $@ $<
+
+TEST_SIGNAL_ACTION_UNIT := $(ROOT)/build/test_signal_action_unit
+
+$(TEST_SIGNAL_ACTION_UNIT): tests/test_signal_action_unit.c src/signal_actions.c \
+		include/libbox64_signal_actions.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c11 -Wall -Wextra -Werror -Iinclude -pthread \
+		-Wl,--wrap=sigaction -o $@ tests/test_signal_action_unit.c src/signal_actions.c
+
+test-signal-action-unit: $(TEST_SIGNAL_ACTION_UNIT)
+	$(TEST_SIGNAL_ACTION_UNIT)
+
+TEST_SIGNAL_ACTIONS := $(ROOT)/build/test_signal_actions
+
+$(TEST_SIGNAL_ACTIONS): tests/test_signal_actions.c $(GUEST_SIGNAL_ACTIONS_SO) \
+		$(BUILD_STATIC)/libbox64.a $(SIGNAL_ACTIONS_PATCHES)
+	@mkdir -p $(dir $@)
+	$(CC) -Og -g -std=c11 -Wall -Wextra -D_GNU_SOURCE \
+		-Iinclude -I$(BOX64)/src/include -I$(BOX64)/src -o $@ tests/test_signal_actions.c \
+		-Wl,--whole-archive $(BUILD_STATIC)/libbox64.a $(DYNAREC_STATIC) \
+		-Wl,--no-whole-archive $(RUST_STATIC) \
+		-lpthread -lm -ldl -lrt -lresolv -lutil -rdynamic
+
+# The matrix is read as DATA from tests/signal-actions-cases.list, which is the
+# normative list. Fields one to three of every line that does not start with
+# whitespace are <case> <policy> <modes>; a line that DOES start with whitespace
+# is a wrapped prose continuation of the fourth ("what it proves") column and is
+# skipped. A hand-transcribed target drifts from the list; this one cannot.
+#
+# Cartesian expansion, one fresh process per run because the action table and
+# the mask-policy default are process-wide and one-shot:
+#   both     BOX64_DYNAREC=1 and =0, crossed with the policy column
+#   dynarec  JIT only (smc is a self-modifying-code repair: no interpreter case)
+#   single   once, both variables unset (not-init asserts ENOSYS BEFORE the
+#            engine is up, so it cannot run under a policy)
+# A '-' policy column leaves BOX64DL_SIGNAL_POLICY unset, so the engine default
+# is what the case exercises. The allocation-sensitive cases run under
+# MALLOC_PERTURB_=165 so a stale read or use-after-free shows as garbage instead
+# of silence.
+#
+# Fail-fast: the matrix is one shell with `set -e`, so the first failing case
+# aborts make. Cases that fork children, join a bounded worker or race real
+# deliveries get 60 s; the rest get 30 s (already far above their real runtime).
+SA_CASES := $(ROOT)/tests/signal-actions-cases.list
+SA_SLOW := concurrent resethand-race fatal pagefix native-fault native-c-fault smc chld longjmp uc-mask
+
+test-signal-actions:
+	@set -e; \
+	if [ -z "$(SIGNAL_ACTIONS_READY)" ]; then \
+		echo "test-signal-actions: engine half not in the queue yet." >&2; \
+		echo "  need exactly one patches/0020*.patch (init install +" >&2; \
+		echo "  box64dl_engine_signal_hook) and exactly one patches/0021*.patch" >&2; \
+		echo "  (guest registration path + guest worker), plus src/signal_actions.c" >&2; \
+		echo "  and src/signal_guest.c. found 0020: $(notdir $(SIGNAL_ACTIONS_PATCH_0020))" >&2; \
+		echo "  found 0021: $(notdir $(SIGNAL_ACTIONS_PATCH_0021))" >&2; \
+		echo "  the core module itself is testable now: make test-signal-action-unit" >&2; \
+		exit 1; \
+	fi; \
+	test -f "$(SA_CASES)" || { echo "test-signal-actions: no $(SA_CASES)" >&2; exit 1; }; \
+	$(MAKE) --no-print-directory $(TEST_SIGNAL_ACTIONS) $(GUEST_SIGNAL_ACTIONS_SO); \
+	n=0; \
+	echo "== signal-actions: matrix from tests/signal-actions-cases.list =="; \
+	while IFS= read -r line; do \
+		case "$$line" in ''|\#*|[[:space:]]*) continue ;; esac; \
+		set -- $$line; \
+		c=$$1; pol=$$2; modes=$$3; \
+		[ -n "$$c" ] && [ -n "$$modes" ] || continue; \
+		case "$$modes" in \
+			both) set -- 1 0 ;; \
+			dynarec) set -- 1 ;; \
+			*) set -- - ;; \
+		esac; \
+		for dy in "$$@"; do \
+			env=""; \
+			[ "$$dy" = "-" ] || env="BOX64_DYNAREC=$$dy"; \
+			[ "$$pol" = "-" ] || env="$$env BOX64DL_SIGNAL_POLICY=$$pol"; \
+			case "$$c" in concurrent|resethand-race) env="MALLOC_PERTURB_=165 $$env" ;; esac; \
+			t=30; \
+			case " $(SA_SLOW) " in *" $$c "*) t=60 ;; esac; \
+			n=$$((n+1)); \
+			echo "== signal-actions: $$c (dynarec=$$dy policy=$$pol timeout=$${t}s) =="; \
+			timeout $$t env $$env $(TEST_SIGNAL_ACTIONS) $(GUEST_SIGNAL_ACTIONS_SO) $$c \
+				|| { echo "signal-actions: FAIL $$c (dynarec=$$dy policy=$$pol)" >&2; exit 1; }; \
+		done; \
+	done < "$(SA_CASES)"; \
+	echo "== signal-actions: $$n process(es) passed =="
+
 # Per-call signal-policy microbenchmark (the "policy cases" of the bench suite;
 # the fixed-arity call-path numbers live in bench_call_arity). Fresh process per
 # policy because the global default is immutable after init; numbers on stderr,
@@ -742,9 +951,10 @@ check-vendor:
 		exit 1; \
 	fi
 
-# Post-patch audit: submodule commit, patch sha256s, pristine-upstream apply and
-# worktree drift, all in tools/verify_box64_patch.sh. Run after `make patch` (or
-# `make graft`); `--write` re-cuts patches/box64.lock after a deliberate edit.
+# Post-patch audit: submodule commit, pristine-upstream apply and worktree
+# drift, all in tools/verify_box64_patch.sh. Run after `make patch` (or
+# `make graft`). Nothing is hashed or locked: the verifier re-applies the queue
+# to a pristine export and compares the files directly.
 check-vendor-patches:
 	tools/verify_box64_patch.sh --check
 
@@ -772,7 +982,7 @@ $(PATCH_STAMP): $(PATCHES)
 			exit 1; \
 		fi; \
 	done; \
-	cd "$(ROOT)" && sha256sum $(PATCHES) > "$(PATCH_STAMP)"
+	cd "$(ROOT)" && touch "$(PATCH_STAMP)"
 
 # Reverse patches/ (newest first). Used by distclean.
 unpatch:

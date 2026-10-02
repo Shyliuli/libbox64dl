@@ -1,0 +1,1113 @@
+# libbox64dl patch 0021: guest-side application signal actions.
+#
+# The process-wide logical action (one current action per signal, shared by
+# native and guest callers) and the kernel dispositions belong to
+# src/signal_actions.c (patch 0020). This patch is the GUEST half declared in
+# include/libbox64_signal_actions.h:
+#
+#   src/signal_guest.c   the active-delivery frame stack, the pending
+#                        resume-mask handoff, the guest<->logical action
+#                        conversion (libc 152-byte and kernel 32-byte
+#                        rt_sigaction layouts, sigsetsize == 8), the stable
+#                        guest-callable bridge for a NATIVE action, and the
+#                        suspension wrapper that keeps the frames from dangling
+#                        across a foreign longjmp.
+#
+# What changes in the engine, and why:
+#
+#   libtools/signals.c  every registration entry point (my_signal,
+#                       __sysv_signal/sysv_signal, my_sigaction/__sigaction,
+#                       my_syscall_rt_sigaction, my_sigset) is a view of the ONE
+#                       logical action table. A guest query returns the ORIGINAL
+#                       value -- the guest pointer for a GUEST action, a stable
+#                       guest-callable bridge for a NATIVE one, SIG_DFL/SIG_IGN
+#                       otherwise -- and a guest reinstall of that bridge lands
+#                       back on the NATIVE action (never the bridge address
+#                       stored as a guest handler, never a raw native pointer
+#                       executed on the CPU). Invalid signals keep Linux's own
+#                       errors: <=0 or >MAX_SIGNAL is EINVAL/SIG_ERR, and the C
+#                       library's 32/33 are ENOTSUP (no path silently overwrites
+#                       the C library's internal handler). SIGKILL and SIGSTOP
+#                       cannot be caught, so a SET of either is EINVAL/SIG_ERR,
+#                       while a QUERY of one is legal and reports the
+#                       unchangeable default.
+#
+#                       my_sigactionhandler_oldcode(_64) takes the immutable
+#                       action snapshot by value instead of reading
+#                       my_context->signals/is_sigaction/restorer/onstack, and
+#                       fills the synthetic guest uc_sigmask from the delivering
+#                       native context instead of leaving it uninitialised.
+#                       A guest uc_sigmask edit is honoured on BOTH exits: on the
+#                       ordinary return it is applied to the bridge frame, and
+#                       across a siglongjmp it is recorded for the resume hook
+#                       so it wins over patch 0005's M0/M1 restore. The guest
+#                       restorer is preserved for query round trips but NEVER
+#                       executed natively.
+#
+#   os/emit_signals_linux.c  an emulator-generated signal (privileged
+#                       instruction, INT n, divide by zero, repaired page) is
+#                       delivered through the same logical table.
+#
+#   dynarec/dynarec.c   one hunk in the SigSetJmp resume branch: after patch
+#                       0005 restores the frame's policy mask, apply the guest
+#                       handler's recorded uc_sigmask edit and drop the
+#                       abandoned guest delivery frames.
+#
+# NOT COMPILED-IN: the four fatal signals still reach the action module through
+# patch 0020's dispatcher. This patch does not touch init/fini, the kernel entry
+# variants or box64context.c.
+--- a/src/libtools/signals.c
++++ b/src/libtools/signals.c
+--- a/src/libtools/signals.c
++++ b/src/libtools/signals.c
+@@ -56,6 +56,31 @@
+  * hunks, so `make patch`'s reverse-dry-run checks stay clean. */
+ extern void box64dl_signal_mask_restore(int active_policy, const void* ucntx);
+ 
++/* libbox64dl patch 0021: the guest half of the application action
++ * (src/signal_guest.c).  The logical action itself lives in
++ * src/signal_actions.c (patch 0020); these are the guest-side conversions, the
++ * active-delivery frames and the resume-time mask handoff. */
++#include "libbox64_signal_actions.h"
++
++extern void box64dl_signal_guest_enter(int host_sig, void* native_uc,
++                                       const box64dl_signal_action_t* action);
++extern void box64dl_signal_guest_leave(void);
++extern void box64dl_signal_guest_frames_invalidate(void);
++extern uintptr_t box64dl_signal_guest_export(int host_sig,
++                                             const box64dl_signal_action_t* a);
++extern int box64dl_signal_guest_import(uintptr_t handler, uintptr_t* native_out);
++extern void box64dl_signal_guest_decode_libc(const x64_sigaction_t* in,
++                                             box64dl_signal_action_t* out);
++extern void box64dl_signal_guest_encode_libc(const box64dl_signal_action_t* a,
++                                             x64_sigaction_t* out);
++extern int box64dl_signal_guest_decode_rt(const x64_sigaction_restorer_t* in,
++                                          int sigsetsize,
++                                          box64dl_signal_action_t* out);
++extern int box64dl_signal_guest_encode_rt(const box64dl_signal_action_t* a,
++                                          x64_sigaction_restorer_t* out);
++extern void box64dl_signal_guest_note_resume_mask(const x64_sigset_t* mask);
++extern void box64dl_signal_guest_apply_mask_edit(const x64_sigset_t* edited);
++
+ static void sigstack_destroy(void* p)
+ {
+     x64_stack_t *ss = (x64_stack_t*)p;
+@@ -270,14 +295,39 @@
+ #ifdef BOX32
+ int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db);
+ #endif
+-int my_sigactionhandler_oldcode_64(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db)
++/* libbox64dl patch 0021: the immutable action snapshot is passed BY VALUE, not
++ * read out of the shared my_context arrays.  The process-wide action can be
++ * replaced concurrently with this delivery, and the arrays are no longer where
++ * the engine keeps it (src/signal_actions.c, patch 0020, owns it).  A caller
++ * with no action still gets an honest SIG_DFL snapshot. */
++int my_sigactionhandler_oldcode_64(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db, const box64dl_signal_action_t* action)
+ {
+     int Locks = unlockMutex();
+     int log_minimum = (BOX64ENV(showsegv))?LOG_NONE:LOG_DEBUG;
+ 
+-    printf_log(LOG_DEBUG, "Sigactionhanlder for signal #%d called (jump to %p/%s)\n", sig, (void*)my_context->signals[sig], GetNativeName((void*)my_context->signals[sig], 1));
++    int host_sig = signal_from_x64(sig);
++    box64dl_signal_action_t act = {0};
++    if(action)
++        act = *action;
++    else if(box64dl_signal_action_get(host_sig, &act) != 0) {
++        act.kind = BOX64_SIGNAL_ACTION_DEFAULT;
++        act.handler = 0;
++    }
++    simple = ((uint32_t)act.flags & SA_SIGINFO) ? 0 : 1;
++    (void)simple;   /* the 32-bit variant takes it; the 64-bit one does not */
++    uintptr_t handler = box64dl_signal_guest_export(host_sig, &act);
++    if(handler == 0 && act.kind == BOX64_SIGNAL_ACTION_NATIVE) {
++        /* The stable bridge could not be built (bounded cache or engine not
++         * ready).  Handing 0 to the guest would read as SIG_DFL, so refuse the
++         * delivery loudly instead of running a different action. */
++        printf_log(LOG_NONE, "%04d|signal %d: no guest bridge for the native action (errno=%d)\n", GetTID(), sig, errno);
++        relockMutex(Locks);
++        return 0;
++    }
++    const char* hname = (act.kind == BOX64_SIGNAL_ACTION_GUEST) ? GetNativeName((void*)act.handler, 1) : "native action";
++    printf_log(LOG_DEBUG, "Sigactionhanlder for signal #%d called (jump to %p/%s)\n", sig, (void*)handler, hname);
+ 
+-    uintptr_t restorer = my_context->restorer[sig];
++    uintptr_t restorer = act.restorer;
+     // get that actual ESP first!
+     if(!emu)
+         emu = thread_get_emu();
+@@ -296,8 +346,9 @@
+     void* pc = NULL;
+ #endif
+ 
+-    // stack tracking
+-    x64_stack_t *new_ss = my_context->onstack[sig]?(x64_stack_t*)pthread_getspecific(sigstack_key):NULL;
++    // stack tracking (logical SA_ONSTACK; the guest's own my_sigaltstack owns
++    // the guest frame, the kernel still honours the HOST alt stack)
++    x64_stack_t *new_ss = ((uint32_t)act.flags & SA_ONSTACK)?(x64_stack_t*)pthread_getspecific(sigstack_key):NULL;
+     int used_stack = 0;
+     if(new_ss && (new_ss->ss_flags!=SS_ONSTACK)) {  // alt stack and not already using it
+         frame = (uintptr_t)(((uintptr_t)new_ss->ss_sp + new_ss->ss_size - 16ULL) & ~0x0fULL);
+@@ -335,6 +386,17 @@
+         sigcontext->uc_stack.ss_flags = new_ss->ss_flags;
+     } else
+         sigcontext->uc_stack.ss_flags = SS_DISABLE;
++    /* libbox64dl patch 0021: the synthetic guest frame is bounded and built
++     * here, so uc_sigmask must be filled from the delivering native context
++     * DELIBERATELY.  It used to be an uninitialised tail of a stack-shaped
++     * structure, and it is the field the guest handler edits and the engine
++     * compares.  Zeroing the tail is what makes that comparison meaningful. */
++    memset(sigcontext->uc_sigmask.sig, 0, sizeof(sigcontext->uc_sigmask.sig));
++    {
++        ucontext_t* nuc = (ucontext_t*)ucntx;
++        if(nuc)
++            memcpy(sigcontext->uc_sigmask.sig, &nuc->uc_sigmask, sizeof(uint64_t));
++    }
+     // Try to guess some X64_TRAPNO
+     /*
+     TRAP_x86_DIVIDE     = 0,   // Division by zero exception
+@@ -486,7 +548,7 @@
+     if(!(sig==X64_SIGSEGV || (Locks&is_dyndump_locked) || (Locks&is_memprot_locked)))
+         dynarec = BOX64ENV(dynarec_interp_signal)?0:1;
+     #endif
+-    ret = RunFunctionHandler(emu, &exits, dynarec, sigcontext, my_context->signals[info2->si_signo], 3, info2->si_signo, info2, sigcontext);
++    ret = RunFunctionHandler(emu, &exits, dynarec, sigcontext, handler, 3, info2->si_signo, info2, sigcontext);
+     if(used_stack)  // release stack
+         new_ss->ss_flags = 0;
+     // restore old value from emu
+@@ -501,7 +563,84 @@
+     GO(RBP);
+     #undef GO
+ 
+-    if(memcmp(sigcontext, &sigcontext_copy, sizeof(x64_ucontext_t))) {
++    /* libbox64dl patch 0021: an EDIT of uc_sigmask is a decision about the
++     * signal mask, not about where execution resumes.  It is therefore honoured
++     * on a plain return, on the dynarec native_next return, and across a
++     * siglongjmp -- and the kernel's own sigreturn would otherwise put the
++     * PRE-delivery host mask back and lose it.  The transfer therefore happens
++     * HERE, before every early return below, into the REAL host ucontext (the
++     * mask the kernel will actually restore) and into the live thread mask.
++     * Only the first 64 bits are copied: that is the whole set a guest can name
++     * through a sigsetsize==8 interface, so the remaining host words keep their
++     * pre-delivery value.
++     *
++     * SCOPE, stated precisely: this is a MASK transfer only.  The guest
++     * register/FPU edits in the synthetic x64 ucontext are NOT copied into the
++     * native context, and they are not reached on the plain-return path at all:
++     * the engine restores the pre-call registers from the emu image and then
++     * continues the interrupted native C frame.  A guest edit of the machine
++     * context therefore takes effect only through a resume (the branch below),
++     * which is exactly why the resume trigger is the mcontext and not the
++     * mask. */
++    int uc_mask_edited = memcmp(&sigcontext->uc_sigmask, &sigcontext_copy.uc_sigmask,
++                                sizeof(sigcontext->uc_sigmask)) != 0;
++
++    /* libbox64dl patch 0021: whether the emulator may be resumed by a jump.
++     *
++     * A REAL hardware fault is one the kernel delivered with its own ucontext
++     * (`ucntx != NULL`) and with a positive si_code.  When no dynablock was
++     * found for it, the signal interrupted a native C frame -- host code the
++     * emulator was called into, or a fault that never ran guest code at all --
++     * and there is no guest machine context to resume.  Driving a
++     * siglongjmp/native_next return there would discard that native frame and
++     * hand the guest a state it never had, which is exactly the native-PC
++     * fiction this change removes.  The uc_sigmask decision above is still
++     * honoured; only the unsafe RESUME is refused, and the refusal is logged
++     * with its reason.  A guest register/FPU edit cannot take effect on this
++     * path by construction: there is no guest machine context to resume, so
++     * there is nowhere for it to land.
++     *
++     * Two deliveries must NOT be caught by it:
++     *   - a USER-GENERATED signal (si_code <= 0: SI_USER/SI_TKILL/...), raised
++     *     from inside the emulator by guest code, where emu->jmpbuf is a guest
++     *     frame and resuming is the engine's normal path (an interpreter guest
++     *     fault also has db == NULL, and a guarded user-generated raise must
++     *     keep working under both BOX64_DYNAREC=1 and =0);
++     *   - an EMULATOR-GENERATED signal (EmitSignal/EmitDiv0/EmitInterruption/
++     *     EmitWineInt), which passes native_uc == NULL and has NO interrupted
++     *     native frame.  Its positive si_code describes box64's own internal
++     *     reason, not a kernel fault, so it must keep its existing guest resume.
++     *
++     * The predicate therefore needs the real-ucontext presence, not si_code
++     * alone, and it must NOT be compiled out without a dynarec: an
++     * interpreter-only build can still be inside a native C frame.  It uses the
++     * raw `cur_db` parameter rather than the dynarec-local `db`, because in a
++     * build without a dynarec there is no `db` -- and that is precisely the
++     * build this guard must keep protecting. */
++    int resume_unsafe = (ucntx != NULL && info && info->si_code > 0 && !cur_db);
++    if(uc_mask_edited) {
++        box64dl_signal_guest_apply_mask_edit(&sigcontext->uc_sigmask);
++        {
++            ucontext_t* nuc = (ucontext_t*)ucntx;
++            if(nuc)
++                memcpy(&nuc->uc_sigmask, sigcontext->uc_sigmask.sig, sizeof(uint64_t));
++        }
++    }
++
++    /* libbox64dl patch 0021: the RESUME trigger is a change the emulator can
++     * actually resume from -- the guest machine context (registers, IP, flags,
++     * FPU state).  A change to uc_sigmask ALONE is not one: the mask was already
++     * handled above, and driving a siglongjmp/native_next return for it would
++     * abandon the native C frame the signal interrupted (and on a host-only
++     * fault it would resume an emulator state that was never running at all).
++     * The mask change is still recorded in `sigcontext`, so the comparison is
++     * restricted to the mcontext instead of dropping the mask from the copy. */
++    int uc_mctx_edited =
++        memcmp(&sigcontext->uc_mcontext, &sigcontext_copy.uc_mcontext,
++               sizeof(sigcontext->uc_mcontext)) != 0 ||
++        memcmp(&sigcontext->xstate, &sigcontext_copy.xstate,
++               sizeof(sigcontext->xstate)) != 0;
++    if(uc_mctx_edited) {
+         #if defined(DYNAREC)
+         if(db) {
+             // if signal was inside a dynablock, just mirror all the new regs in the right place to simple run native_next
+@@ -511,7 +650,9 @@
+             return 1;
+         }
+         #endif
+-        if(emu->jmpbuf) {
++        if(resume_unsafe) {
++            printf_log(log_minimum, "Signal %d: guest machine context changed, but the delivery interrupted a native C frame (real hardware fault, no dynablock); not resuming the emulator (the uc_sigmask edit was still applied; a register/FPU edit has no guest context to land in)\n", sig);
++        } else if(emu->jmpbuf) {
+             if((skip==1) && (emu->ip.q[0]!=sigcontext->uc_mcontext.gregs[X64_RIP]))
+                 skip = 3;   // if it jumps elsewhere, it can resume with dynarec...
+             mctx2emu(emu, &sigcontext->uc_mcontext);
+@@ -529,8 +670,19 @@
+             #ifdef DYNAREC
+             dynablock_leave_runtime((dynablock_t*)cur_db);
+             #endif
++            /* patch 0021: a guest uc_sigmask edit must survive the resume, but
++             * 0005 will restore M0 (COMPAT) or M1 (FAST) after the jump, not
++             * this edit.  Record it for the resume hook -- which runs on the
++             * far side of the jump, after 0005 -- and drop the guest delivery
++             * frames: this signal stack is about to become unreachable.  This
++             * is the case where a mask edit matters: the resume happens because
++             * the guest changed its machine context, and the mask it asked for
++             * must not be lost on the way back. */
++            if(uc_mask_edited)
++                box64dl_signal_guest_note_resume_mask(&sigcontext->uc_sigmask);
+             /* patch 0005: restore the mask under this frame's own policy. */
+             box64dl_signal_mask_restore(emu->active_jmpbuf_policy, ucntx);
++            box64dl_signal_guest_frames_invalidate();
+             #ifdef ANDROID
+             siglongjmp(*emu->jmpbuf, skip);
+             #else
+@@ -539,6 +691,9 @@
+         }
+         printf_log(LOG_INFO, "Warning, context has been changed in Sigactionhanlder%s\n", (sigcontext->uc_mcontext.gregs[X64_RIP]!=sigcontext_copy.uc_mcontext.gregs[X64_RIP])?" (EIP changed)":"");
+     }
++    /* The uc_sigmask transfer already happened above, before every early
++     * return; nothing to do here on the ordinary return either. */
++    (void)uc_mask_edited;
+     // restore regs...
+     #define GO(R)   R_##R=sigcontext->uc_mcontext.gregs[X64_##R]
+     GO(RAX);
+@@ -581,13 +736,21 @@
+         #endif
+         exit(ret);
+     }
+-    if(restorer)
+-        RunFunctionHandler(emu, &exits, 0, NULL, restorer, 0);
++    /* libbox64dl patch 0021: `restorer` is a GUEST address when the action is
++     * a guest one; it is preserved so a query round-trips it, but it is NEVER
++     * executed here.  Running it would issue the guest's rt_sigreturn(2)
++     * against a synthetic frame the emulator has already consumed.  box64
++     * builds its own frame and returns to the guest itself. */
++    (void)restorer;
+     relockMutex(Locks);
+     return 0;
+ }
+ 
+-void my_sigactionhandler_oldcode(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db, uintptr_t x64pc)
++/* libbox64dl patch 0021: the trailing argument is the immutable action snapshot
++ * for THIS delivery (NULL means "resolve it from the logical table").  Passing
++ * the value down keeps a concurrent replacement from changing the action in the
++ * middle of a delivery. */
++void my_sigactionhandler_oldcode(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db, uintptr_t x64pc, const box64dl_signal_action_t* action)
+ {
+     #define GO(A) uintptr_t old_##A = R_##A;
+     GO(RAX);
+@@ -649,7 +812,7 @@
+         direct_ret = my_sigactionhandler_oldcode_32(emu, sig, simple, info, ucntx, old_code, cur_db);
+     } else
+     #endif
+-    direct_ret = my_sigactionhandler_oldcode_64(emu, sig, simple, info, ucntx, old_code, cur_db);
++    direct_ret = my_sigactionhandler_oldcode_64(emu, sig, simple, info, ucntx, old_code, cur_db, action);
+     if(direct_ret)
+         return;
+     #define GO(A) R_##A = old_##A
+@@ -687,6 +850,42 @@
+     emu->top = old_top;
+ }
+ 
++/* libbox64dl patch 0021: the guest worker the action module calls for a GUEST
++ * action (declared in include/libbox64_signal_actions.h).  It owns the guest
++ * lookup and the handler invocation, and it is the ONLY place that enters the
++ * guest delivery frames around the engine's my_sigactionhandler_oldcode
++ * machinery.  `native_uc` is the REAL host ucontext of the delivery (NULL for
++ * an emulator-generated signal), and `action` is a caller-owned snapshot that
++ * stays valid for the whole call.
++ *
++ * Returns only on the ordinary path; a guest resume longjmp leaves through the
++ * engine, in which case the dynarec resume hook has already dropped the frames
++ * (and the epoch makes any survivor unreadable). */
++void box64dl_signal_guest_deliver(x64emu_t* emu, int host_sig, siginfo_t* info,
++                                  void* native_uc,
++                                  const box64dl_signal_action_t* action,
++                                  void* dynablock, uintptr_t x64pc)
++{
++    if(!action)
++        return;
++    /* Only a GUEST action has a guest worker.  DEFAULT/IGNORE are resolved by
++     * the action module before it ever calls this, and a NATIVE action is
++     * called there directly with the real native context; reaching here with
++     * either would mean calling a native function through the guest path. */
++    if(action->kind != BOX64_SIGNAL_ACTION_GUEST)
++        return;
++    if(!emu)
++        emu = thread_get_emu();
++    if(!emu)
++        return;
++    box64dl_signal_guest_enter(host_sig, native_uc, action);
++    my_sigactionhandler_oldcode(emu, signal_to_x64(host_sig),
++                                ((uint32_t)action->flags & SA_SIGINFO) ? 0 : 1,
++                                info, native_uc, NULL, dynablock, x64pc, action);
++    /* Ordinary return only. */
++    box64dl_signal_guest_leave();
++}
++
+ extern void* current_helper;
+ extern int fillblock_active;
+ #define USE_SIGNAL_MUTEX
+@@ -1270,14 +1469,32 @@
+         }
+     }
+     relockMutex(Locks);
+-    if(my_context->signals[sig] && my_context->signals[sig]!=1) {
+-        my_sigactionhandler_oldcode(emu, sig, my_context->is_sigaction[sig]?0:1, info, ucntx, &old_code, db, x64pc);
+-        return;
++    /* libbox64dl patch 0021: the decision is the ONE process-wide logical action
++     * (src/signal_actions.c), not an entry in the old shared array.  The array
++     * is not where the engine keeps the application's action any more, and it
++     * could hold a GUEST address -- reinstalling that as a kernel disposition
++     * would be the raw-native-pointer bug this change exists to remove.
++     *
++     * The guest/custom dispatch itself stays in the engine's own worker
++     * (my_sigactionhandler_oldcode_64), which now takes the immutable snapshot
++     * by value. */
++    {
++        box64dl_signal_action_t act;
++        if(box64dl_signal_action_get(signal_from_x64(sig), &act) != 0) {
++            act.kind = BOX64_SIGNAL_ACTION_DEFAULT;
++            act.handler = 0;
++            act.flags = 0;
++            act.restorer = 0;
++        }
++        if(act.kind != BOX64_SIGNAL_ACTION_DEFAULT) {
++            my_sigactionhandler_oldcode(emu, sig, 0, info, ucntx, &old_code, db, x64pc, &act);
++            return;
++        }
+     }
+     // no handler
+     // set default and that's it, instruction will restart and default segfault handler will be called...
+-    if(my_context->signals[sig]!=1 || sig==X64_SIGSEGV || sig==X64_SIGILL || sig==X64_SIGFPE || sig==X64_SIGABRT) {
+-        signal(signal_from_x64(sig), (void*)my_context->signals[sig]);
++    if(sig==X64_SIGSEGV || sig==X64_SIGILL || sig==X64_SIGFPE || sig==X64_SIGABRT) {
++        signal(signal_from_x64(sig), SIG_DFL);
+     }
+ }
+ 
+@@ -1308,214 +1525,258 @@
+             printf_log_prefix(0, LOG_INFO, "(x64_addr=%p-%p, block:%p-%p)\n", (void*)db->x64_addr, (void*)db->x64_addr+db->x64_size, db->actual_block, db->actual_block+db->size);
+         #endif
+     }
+-    my_sigactionhandler_oldcode(emu, sig, 0, info, ucntx, NULL, db, x64pc);
++    my_sigactionhandler_oldcode(emu, sig, 0, info, ucntx, NULL, db, x64pc, NULL);
+ }
+ #define MY_SIGHANDLER ((signum==X64_SIGSEGV || signum==X64_SIGBUS || signum==X64_SIGILL || signum==X64_SIGABRT)?my_box64signalhandler:my_sigactionhandler)
+-EXPORT sighandler_t my_signal(x64emu_t* emu, int signum, sighandler_t handler)
++/* libbox64dl patch 0021: every registration entry point below is a view of the
++ * ONE process-wide logical action table (src/signal_actions.c, patch 0020).
++ * None of them stores a handler in my_context->signals[] any more, and none of
++ * them forwards a guest address to the kernel:
++ *   - the logical action is the source of truth, shared by native and guest
++ *     callers;
++ *   - a GUEST handler stays a guest address and is dispatched by the engine's
++ *     own worker;
++ *   - a NATIVE handler is called by the action module with the real delivered
++ *     info/ucontext;
++ *   - a query returns the ORIGINAL value: the guest pointer for GUEST, a stable
++ *     guest-callable bridge for NATIVE, SIG_DFL/SIG_IGN for the others.
++ * Invalid signals (<=0, >MAX_SIGNAL, SIGKILL, SIGSTOP, and the C library's
++ * 32/33) keep Linux's EINVAL/SIG_ERR.  They are never silently clamped, and
++ * there is no second raw path for 32/33 that would overwrite the host C
++ * library's own internal handler.
++ *
++ * The four engine-fatal signals are registered in the same table as any other:
++ * the action module owns their kernel disposition and the engine's terminal
++ * path applies a DEFAULT action.  There is no "no_sigsegv" shortcut here that
++ * would report success while recording nothing. */
++
++static int box64dl_sig_reserved(int signum)
+ {
+-    if(signum<0 || signum>MAX_SIGNAL)
++    return signum == 32 || signum == 33;
++}
++
++/* Shared body of the signal()/sysv_signal() family.  `is_sysv` selects the
++ * historical System V semantics, which are NOT the BSD ones and are therefore
++ * not an alias: BSD signal() is sigaction with SA_RESTART, while SYSV signal()
++ * is the other polarity (no SA_RESTART) and resets to SIG_DFL on delivery. */
++static sighandler_t box64dl_signal_set(x64emu_t* emu, int signum,
++                                       sighandler_t handler, int is_sysv)
++{
++    (void)emu;
++    if(signum <= 0 || signum > MAX_SIGNAL) {
++        errno = EINVAL;
+         return SIG_ERR;
++    }
++    if(signum == SIGKILL || signum == SIGSTOP) {
++        errno = EINVAL;
++        return SIG_ERR;
++    }
++    if(box64dl_sig_reserved(signum)) {
++        errno = ENOTSUP;
++        return SIG_ERR;
++    }
+ 
+-    if(signum==X64_SIGSEGV && emu->context->no_sigsegv)
+-        return 0;
++    int host_sig = signal_from_x64(signum);
++    box64dl_signal_action_t act;
++    memset(&act, 0, sizeof(act));
++    if(handler == SIG_IGN) {
++        act.kind = BOX64_SIGNAL_ACTION_IGNORE;
++    } else if(handler == SIG_DFL) {
++        act.kind = BOX64_SIGNAL_ACTION_DEFAULT;
++    } else {
++        uintptr_t nat = 0;
++        if(box64dl_signal_guest_import((uintptr_t)handler, &nat)) {
++            /* A bridge this engine handed out is the NATIVE action coming back
++             * through a query -> reinstall round trip. */
++            act.kind = BOX64_SIGNAL_ACTION_NATIVE;
++            act.handler = nat;
++        } else {
++            act.kind = BOX64_SIGNAL_ACTION_GUEST;
++            act.handler = (uintptr_t)handler;
++        }
++        act.flags = is_sysv
++                        ? (uint64_t)(uint32_t)(SA_RESETHAND | SA_NODEFER)
++                        : (uint64_t)(uint32_t)SA_RESTART;
++    }
++    /* The REPLACED action comes out of the setter itself.  A separate queried
++     * snapshot would be stale whenever another thread replaced the action in
++     * between, and the value signal() returns must be the one it replaced. */
++    box64dl_signal_action_t old;
++    if(box64dl_signal_action_set(host_sig, &act, &old) != 0)
++        return SIG_ERR;
++    uintptr_t prev = box64dl_signal_guest_export(host_sig, &old);
++    if(prev == 0 && old.kind == BOX64_SIGNAL_ACTION_NATIVE)
++        return SIG_ERR;     /* no stable bridge; errno set by the export */
++    return (sighandler_t)prev;
++}
+ 
+-    // create a new handler
+-    my_context->signals[signum] = (uintptr_t)handler;
+-    my_context->is_sigaction[signum] = 0;
+-    my_context->restorer[signum] = 0;
+-    my_context->onstack[signum] = 0;
++EXPORT sighandler_t my_signal(x64emu_t* emu, int signum, sighandler_t handler)
++{
++    return box64dl_signal_set(emu, signum, handler, 0);
++}
++EXPORT sighandler_t my___sysv_signal(x64emu_t* emu, int signum, sighandler_t handler)
++{
++    return box64dl_signal_set(emu, signum, handler, 1);
++}
++EXPORT sighandler_t my_sysv_signal(x64emu_t* emu, int signum, sighandler_t handler)
++{
++    return box64dl_signal_set(emu, signum, handler, 1);
++}
+ 
+-    if(signum==X64_SIGSEGV || signum==X64_SIGBUS || signum==X64_SIGILL || signum==X64_SIGABRT)
+-        return 0;
++/* libbox64dl patch 0021: encode an action for the GUEST.
++ *
++ * The module's encoders write the raw logical values, which is what the action
++ * table wants; a guest must never receive a raw native C pointer, because a
++ * later call would run host code on the CPU, and a reinstall would store a
++ * host address as a guest handler.  A NATIVE action is therefore exported
++ * through the stable guest-callable bridge FIRST and only then encoded.  When
++ * that bridge cannot be built the query FAILS (errno from the export) instead
++ * of returning a raw pointer or a 0 that would read as SIG_DFL.
++ *
++ * The encode is done into a local snapshot whose handler is the exported value;
++ * everything else (flags/mask/restorer) is the logical action verbatim. */
++static int box64dl_encode_libc_for_guest(int host_sig,
++                                         const box64dl_signal_action_t* a,
++                                         x64_sigaction_t* out)
++{
++    box64dl_signal_action_t view = *a;
++    if(a->kind == BOX64_SIGNAL_ACTION_NATIVE) {
++        uintptr_t br = box64dl_signal_guest_export(host_sig, a);
++        if(!br)
++            return -1;              /* errno set by the export */
++        view.handler = br;
++    }
++    box64dl_signal_guest_encode_libc(&view, out);
++    return 0;
++}
+ 
+-    if(handler!=NULL && handler!=(sighandler_t)1) {
+-        struct sigaction newact = {0};
+-        struct sigaction oldact = {0};
+-        newact.sa_flags = 0x04;
+-        newact.sa_sigaction = MY_SIGHANDLER;
+-        sigaction(signal_from_x64(signum), &newact, &oldact);
+-        return oldact.sa_handler;
+-    } else
+-        return signal(signal_from_x64(signum), handler);
++static int box64dl_encode_rt_for_guest(int host_sig,
++                                       const box64dl_signal_action_t* a,
++                                       x64_sigaction_restorer_t* out)
++{
++    box64dl_signal_action_t view = *a;
++    if(a->kind == BOX64_SIGNAL_ACTION_NATIVE) {
++        uintptr_t br = box64dl_signal_guest_export(host_sig, a);
++        if(!br)
++            return -1;
++        view.handler = br;
++    }
++    box64dl_signal_guest_encode_rt(&view, out);
++    return 0;
+ }
+-EXPORT sighandler_t my___sysv_signal(x64emu_t* emu, int signum, sighandler_t handler) __attribute__((alias("my_signal")));
+-EXPORT sighandler_t my_sysv_signal(x64emu_t* emu, int signum, sighandler_t handler) __attribute__((alias("my_signal")));    // not completely exact
+ 
+ int EXPORT my_sigaction(x64emu_t* emu, int signum, const x64_sigaction_t *act, x64_sigaction_t *oldact)
+ {
+-    printf_log(LOG_DEBUG, "Sigaction(signum=%d, act=%p(f=%p, flags=0x%x), old=%p)\n", signum, act, act?act->_u._sa_handler:NULL, act?act->sa_flags:0, oldact);
+-    if(signum<0 || signum>MAX_SIGNAL) {
++    (void)emu;
++    printf_log(LOG_DEBUG, "Sigaction(signum=%d, act=%p, old=%p)\n", signum, act, oldact);
++    if(signum <= 0 || signum > MAX_SIGNAL) {
+         errno = EINVAL;
+         return -1;
+     }
++    if(box64dl_sig_reserved(signum)) {
++        errno = ENOTSUP;
++        return -1;
++    }
+ 
+-    if(signum==X64_SIGSEGV && emu->context->no_sigsegv)
+-        return 0;
+-
+-    if(signum==X64_SIGILL && emu->context->no_sigill)
+-        return 0;
+-    struct sigaction newact = {0};
+-    struct sigaction old = {0};
+-    uintptr_t old_handler = my_context->signals[signum];
++    int host_sig = signal_from_x64(signum);
+     if(act) {
+-        newact.sa_mask = act->sa_mask;
+-        newact.sa_flags = act->sa_flags&~0x04000000;  // No sa_restorer...
+-        if(act->sa_flags&0x04) {
+-            my_context->signals[signum] = (uintptr_t)act->_u._sa_sigaction;
+-            my_context->is_sigaction[signum] = 1;
+-            if(act->_u._sa_handler!=NULL && act->_u._sa_handler!=(sighandler_t)1) {
+-                newact.sa_sigaction = MY_SIGHANDLER;
+-            } else
+-                newact.sa_sigaction = act->_u._sa_sigaction;
+-        } else {
+-            my_context->signals[signum] = (uintptr_t)act->_u._sa_handler;
+-            my_context->is_sigaction[signum] = 0;
+-            if(act->_u._sa_handler!=NULL && act->_u._sa_handler!=(sighandler_t)1) {
+-                newact.sa_flags|=0x04;
+-                newact.sa_sigaction = MY_SIGHANDLER;
+-            } else
+-                newact.sa_handler = act->_u._sa_handler;
+-        }
+-        my_context->restorer[signum] = (act->sa_flags&0x04000000)?(uintptr_t)act->sa_restorer:0;
+-        my_context->onstack[signum] = (act->sa_flags&SA_ONSTACK)?1:0;
++        /* KILL/STOP cannot be caught: Linux refuses a SET with EINVAL.  A QUERY
++         * of them is legal and reports the (unchangeable) default, so the check
++         * lives here, on the set path only. */
++        if(signum == SIGKILL || signum == SIGSTOP) {
++            errno = EINVAL;
++            return -1;
++        }
++        box64dl_signal_action_t in;
++        box64dl_signal_action_t old;
++        box64dl_signal_guest_decode_libc(act, &in);
++        if(box64dl_signal_action_set(host_sig, &in, oldact ? &old : NULL) != 0)
++            return -1;
++        if(oldact && box64dl_encode_libc_for_guest(host_sig, &old, oldact) != 0)
++            return -1;      /* installed, but the old action cannot be reported */
++        return 0;
+     }
+-    int ret = 0;
+-    if(signum!=X64_SIGSEGV && signum!=X64_SIGBUS && signum!=X64_SIGILL && signum!=X64_SIGABRT)
+-        ret = sigaction(signal_from_x64(signum), act?&newact:NULL, oldact?&old:NULL);
++    /* Linux semantics: a NULL act is a query and changes nothing. */
+     if(oldact) {
+-        oldact->sa_flags = old.sa_flags;
+-        oldact->sa_mask = old.sa_mask;
+-        if(old.sa_flags & 0x04)
+-            oldact->_u._sa_sigaction = old.sa_sigaction; //TODO should wrap...
+-        else
+-            oldact->_u._sa_handler = old.sa_handler;  //TODO should wrap...
+-        if((uintptr_t)oldact->_u._sa_sigaction == (uintptr_t)MY_SIGHANDLER && old_handler)
+-            oldact->_u._sa_sigaction = (void*)old_handler;
+-        oldact->sa_restorer = NULL; // no handling for now...
++        box64dl_signal_action_t out;
++        if(box64dl_signal_action_get(host_sig, &out) != 0)
++            return -1;
++        if(box64dl_encode_libc_for_guest(host_sig, &out, oldact) != 0)
++            return -1;
+     }
+-    return ret;
++    return 0;
+ }
+ int EXPORT my___sigaction(x64emu_t* emu, int signum, const x64_sigaction_t *act, x64_sigaction_t *oldact)
+-__attribute__((alias("my_sigaction")));
++{
++    return my_sigaction(emu, signum, act, oldact);
++}
+ 
+ int EXPORT my_syscall_rt_sigaction(x64emu_t* emu, int signum, const x64_sigaction_restorer_t *act, x64_sigaction_restorer_t *oldact, int sigsetsize)
+ {
++    (void)emu;
+     printf_log(LOG_DEBUG, "Syscall/Sigaction(signum=%d, act=%p, old=%p, size=%d)\n", signum, act, oldact, sigsetsize);
+-    if(signum<0 || signum>MAX_SIGNAL) {
++    /* The x86_64 kernel accepts exactly sizeof(sigset_t) == 8 and refuses every
++     * other size with EINVAL.  Accepting a short or long one would silently
++     * ignore part of the caller's mask (or read past it). */
++    if(sigsetsize != 8) {
+         errno = EINVAL;
+         return -1;
+     }
++    if(signum <= 0 || signum > MAX_SIGNAL) {
++        errno = EINVAL;
++        return -1;
++    }
++    if(box64dl_sig_reserved(signum)) {
++        errno = ENOTSUP;
++        return -1;
++    }
+ 
+-    if(signum==X64_SIGSEGV && emu->context->no_sigsegv)
++    int host_sig = signal_from_x64(signum);
++    if(act) {
++        if(signum == SIGKILL || signum == SIGSTOP) {
++            errno = EINVAL;
++            return -1;
++        }
++        box64dl_signal_action_t in;
++        box64dl_signal_action_t old;
++        if(box64dl_signal_guest_decode_rt(act, sigsetsize, &in) != 0)
++            return -1;
++        if(box64dl_signal_action_set(host_sig, &in, oldact ? &old : NULL) != 0)
++            return -1;
++        if(oldact && box64dl_encode_rt_for_guest(host_sig, &old, oldact) != 0)
++            return -1;
+         return 0;
+-    // TODO, how to handle sigsetsize>4?!
+-    if(signum==32 || signum==33) {
+-        // cannot use libc sigaction, need to use syscall!
+-        struct kernel_sigaction newact = {0};
+-        struct kernel_sigaction old = {0};
+-        if(act) {
+-            printf_log(LOG_DEBUG, " New (kernel) action flags=0x%x mask=0x%lx\n", act->sa_flags, *(uint64_t*)&act->sa_mask);
+-            memcpy(&newact.sa_mask, &act->sa_mask, (sigsetsize>16)?16:sigsetsize);
+-            newact.sa_flags = act->sa_flags&~0x04000000;  // No sa_restorer...
+-            if(act->sa_flags&0x04) {
+-                my_context->signals[signum] = (uintptr_t)act->_u._sa_sigaction;
+-                my_context->is_sigaction[signum] = 1;
+-                if(act->_u._sa_handler!=NULL && act->_u._sa_handler!=(sighandler_t)1) {
+-                    newact.k_sa_handler = (void*)MY_SIGHANDLER;
+-                } else {
+-                    newact.k_sa_handler = (void*)act->_u._sa_sigaction;
+-                }
+-            } else {
+-                my_context->signals[signum] = (uintptr_t)act->_u._sa_handler;
+-                my_context->is_sigaction[signum] = 0;
+-                if(act->_u._sa_handler!=NULL && act->_u._sa_handler!=(sighandler_t)1) {
+-                    newact.sa_flags|=0x4;
+-                    newact.k_sa_handler = (void*)MY_SIGHANDLER;
+-                } else {
+-                    newact.k_sa_handler = act->_u._sa_handler;
+-                }
+-            }
+-            my_context->restorer[signum] = (act->sa_flags&0x04000000)?(uintptr_t)act->sa_restorer:0;
+-        }
+-
+-        if(oldact) {
+-            old.sa_flags = oldact->sa_flags;
+-            memcpy(&old.sa_mask, &oldact->sa_mask, (sigsetsize>16)?16:sigsetsize);
+-        }
+-
+-        int ret = syscall(__NR_rt_sigaction, signum, act?&newact:NULL, oldact?&old:NULL, (sigsetsize>16)?16:sigsetsize);
+-        if(oldact && ret==0) {
+-            oldact->sa_flags = old.sa_flags;
+-            memcpy(&oldact->sa_mask, &old.sa_mask, (sigsetsize>16)?16:sigsetsize);
+-            if(old.sa_flags & 0x04)
+-                oldact->_u._sa_sigaction = (void*)old.k_sa_handler; //TODO should wrap...
+-            else
+-                oldact->_u._sa_handler = old.k_sa_handler;  //TODO should wrap...
+-        }
+-        return ret;
+-    } else {
+-        // using libc sigaction
+-        struct sigaction newact = {0};
+-        struct sigaction old = {0};
+-        if(act) {
+-            printf_log(LOG_DEBUG, " New action for signal #%d flags=0x%x mask=0x%lx\n", signum, act->sa_flags, *(uint64_t*)&act->sa_mask);
+-            newact.sa_mask = act->sa_mask;
+-            newact.sa_flags = act->sa_flags&~0x04000000;  // No sa_restorer...
+-            if(act->sa_flags&0x04) {
+-                if(act->_u._sa_handler!=NULL && act->_u._sa_handler!=(sighandler_t)1) {
+-                    my_context->signals[signum] = (uintptr_t)act->_u._sa_sigaction;
+-                    newact.sa_sigaction = MY_SIGHANDLER;
+-                } else {
+-                    newact.sa_sigaction = act->_u._sa_sigaction;
+-                }
+-            } else {
+-                if(act->_u._sa_handler!=NULL && act->_u._sa_handler!=(sighandler_t)1) {
+-                    my_context->signals[signum] = (uintptr_t)act->_u._sa_handler;
+-                    my_context->is_sigaction[signum] = 0;
+-                    newact.sa_sigaction = MY_SIGHANDLER;
+-                    newact.sa_flags|=0x4;
+-                } else {
+-                    newact.sa_handler = act->_u._sa_handler;
+-                }
+-            }
+-            my_context->restorer[signum] = (act->sa_flags&0x04000000)?(uintptr_t)act->sa_restorer:0;
+-        }
+-
+-        if(oldact) {
+-            old.sa_flags = oldact->sa_flags;
+-            old.sa_mask = oldact->sa_mask;
+-        }
+-        int ret = 0;
+-
+-        if(signum!=X64_SIGSEGV && signum!=X64_SIGBUS && signum!=X64_SIGILL && signum!=X64_SIGABRT)
+-            ret = sigaction(signal_from_x64(signum), act?&newact:NULL, oldact?&old:NULL);
+-        if(oldact && ret==0) {
+-            oldact->sa_flags = old.sa_flags;
+-            memcpy(&oldact->sa_mask, &old.sa_mask, (sigsetsize>8)?8:sigsetsize);
+-            if(old.sa_flags & 0x04)
+-                oldact->_u._sa_sigaction = old.sa_sigaction; //TODO should wrap...
+-            else
+-                oldact->_u._sa_handler = old.sa_handler;  //TODO should wrap...
+-        }
+-        return ret;
+     }
++    if(oldact) {
++        box64dl_signal_action_t out;
++        if(box64dl_signal_action_get(host_sig, &out) != 0)
++            return -1;
++        if(box64dl_encode_rt_for_guest(host_sig, &out, oldact) != 0)
++            return -1;
++    }
++    return 0;
+ }
+ 
++/* libbox64dl patch 0021: sigset() keeps the x64 signal number for the action
++ * calls (they convert once internally) and converts only where a raw host
++ * syscall needs the host number -- converting at the top and then calling
++ * my_sigaction() would convert twice on an architecture whose numbering
++ * differs.  SIG_HOLD stays an emulated mask bit and reports the action's
++ * logical value, which is the bridge for a NATIVE action. */
+ EXPORT sighandler_t my_sigset(x64emu_t* emu, int signum, sighandler_t handler)
+ {
+-    signum = signal_from_x64(signum);
+-    // emulated SIG_HOLD
+     if(handler == (sighandler_t)2) {
++        int host_sig = signal_from_x64(signum);
+         x64_sigaction_t oact;
+         sigset_t nset;
+         sigset_t oset;
+         if (sigemptyset (&nset) < 0)
+             return (sighandler_t)-1;
+-        if (sigaddset (&nset, signum) < 0)
++        if (sigaddset (&nset, host_sig) < 0)
+             return (sighandler_t)-1;
+         if (sigprocmask (SIG_BLOCK, &nset, &oset) < 0)
+             return (sighandler_t)-1;
+-        if (sigismember (&oset, signum))
++        if (sigismember (&oset, host_sig))
+             return (sighandler_t)2;
+         if (my_sigaction (emu, signum, NULL, &oact) < 0)
+             return (sighandler_t)-1;
+--- a/src/os/emit_signals_linux.c
++++ b/src/os/emit_signals_linux.c
+@@ -24,7 +24,17 @@
+ #include "libtools/signal_private.h"
+ #include "box64cpu_util.h"
+ 
+-void my_sigactionhandler_oldcode(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db, uintptr_t x64pc);
++void my_sigactionhandler_oldcode(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db, uintptr_t x64pc, const void* action);
++
++/* libbox64dl patch 0021: a synthetic signal raised by the emulator itself (a
++ * privileged instruction, an INT n, a divide by zero, a page the engine
++ * repaired) is delivered through the SAME process-wide logical action table as
++ * a real host signal -- never through the old shared my_context->signals[]
++ * array.  The worker resolves the action from the table when passed NULL, and
++ * the export below is what turns it into a guest-callable handler. */
++#include "libbox64_signal_actions.h"
++extern uintptr_t box64dl_signal_guest_export(int host_sig,
++                                             const box64dl_signal_action_t* a);
+ void EmitSignal(x64emu_t* emu, int sig, void* addr, int code)
+ {
+     siginfo_t info = { 0 };
+@@ -107,7 +117,22 @@
+             printf_log(LOG_NONE, "SIGILL: Opcode at ip is %02hhx %02hhx %02hhx %02hhx %02hhx %02hhx\n", mem[0], mem[1], mem[2], mem[3], mem[4], mem[5]);
+         }
+     }
+-    my_sigactionhandler_oldcode(emu, sig, 0, &info, NULL, NULL, NULL, R_RIP);
++    /* libbox64dl patch 0021: ONE decision point.  The emulator-generated signal
++     * goes through box64dl_signal_deliver() so the logical action (DEFAULT/
++     * IGNORE/NATIVE/GUEST), the kind decision and the one-shot (SA_RESETHAND)
++     * consumption happen once, in the module, not in a second copy here.  A
++     * DEFAULT fatal action never returns from it.
++     *
++     * `native_uc` is NULL: an emulator-generated signal has no real host
++     * ucontext, and no translation of the native PC is offered as a guest PC.
++     * variant -1: no kernel entry was taken.
++     *
++     * LIMIT (stated, not hidden): si_errno carries box64's own internal
++     * markers (0x1234/0xbad0/0xecec/0xdead/0xcafe) which the guest-side worker
++     * uses to derive TRAPNO/ERR.  A NATIVE action therefore observes those
++     * markers in si_errno for an emulator-generated signal; a signal that came
++     * from the kernel keeps the kernel's own siginfo. */
++    box64dl_signal_deliver(emu, sig, &info, NULL, -1, NULL, R_RIP);
+ }
+ 
+ void CheckExec(x64emu_t* emu, uintptr_t addr)
+@@ -136,7 +161,22 @@
+             elfname = ElfName(elf);
+         printf_log(LOG_NONE, "Emit Interruption 0x%x at IP=%p(%s / %s) / addr=%p\n", num, (void*)R_RIP, x64name ? x64name : "???", elfname ? elfname : "?", addr);
+     }
+-    my_sigactionhandler_oldcode(emu, X64_SIGSEGV, 0, &info, NULL, NULL, NULL, R_RIP);
++    /* libbox64dl patch 0021: ONE decision point.  The emulator-generated signal
++     * goes through box64dl_signal_deliver() so the logical action (DEFAULT/
++     * IGNORE/NATIVE/GUEST), the kind decision and the one-shot (SA_RESETHAND)
++     * consumption happen once, in the module, not in a second copy here.  A
++     * DEFAULT fatal action never returns from it.
++     *
++     * `native_uc` is NULL: an emulator-generated signal has no real host
++     * ucontext, and no translation of the native PC is offered as a guest PC.
++     * variant -1: no kernel entry was taken.
++     *
++     * LIMIT (stated, not hidden): si_errno carries box64's own internal
++     * markers (0x1234/0xbad0/0xecec/0xdead/0xcafe) which the guest-side worker
++     * uses to derive TRAPNO/ERR.  A NATIVE action therefore observes those
++     * markers in si_errno for an emulator-generated signal; a signal that came
++     * from the kernel keeps the kernel's own siginfo. */
++    box64dl_signal_deliver(emu, X64_SIGSEGV, &info, NULL, -1, NULL, R_RIP);
+ }
+ 
+ void EmitDiv0(x64emu_t* emu, void* addr, int code)
+@@ -155,144 +195,58 @@
+             elfname = ElfName(elf);
+         printf_log(LOG_NONE, "Emit Divide by 0 at IP=%p(%s / %s) / addr=%p\n", (void*)R_RIP, x64name ? x64name : "???", elfname ? elfname : "?", addr);
+     }
+-    my_sigactionhandler_oldcode(emu, X64_SIGSEGV, 0, &info, NULL, NULL, NULL, R_RIP);
++    /* libbox64dl patch 0021: ONE decision point.  The emulator-generated signal
++     * goes through box64dl_signal_deliver() so the logical action (DEFAULT/
++     * IGNORE/NATIVE/GUEST), the kind decision and the one-shot (SA_RESETHAND)
++     * consumption happen once, in the module, not in a second copy here.  A
++     * DEFAULT fatal action never returns from it.
++     *
++     * `native_uc` is NULL: an emulator-generated signal has no real host
++     * ucontext, and no translation of the native PC is offered as a guest PC.
++     * variant -1: no kernel entry was taken.
++     *
++     * LIMIT (stated, not hidden): si_errno carries box64's own internal
++     * markers (0x1234/0xbad0/0xecec/0xdead/0xcafe) which the guest-side worker
++     * uses to derive TRAPNO/ERR.  A NATIVE action therefore observes those
++     * markers in si_errno for an emulator-generated signal; a signal that came
++     * from the kernel keeps the kernel's own siginfo. */
++    box64dl_signal_deliver(emu, X64_SIGSEGV, &info, NULL, -1, NULL, R_RIP);
+ }
+ 
+ void EmitWineInt(x64emu_t* emu, int num, void* addr)
+ {
++    /* libbox64dl patch 0021: an emulator-generated INT n is the SAME logical
++     * SIGSEGV delivery as a real fault.  It is routed through the module's
++     * single decision point -- box64dl_signal_deliver() -- so the one-shot
++     * (SA_RESETHAND) consumption and the kind decision (DEFAULT/IGNORE/NATIVE/
++     * GUEST) happen exactly once and in exactly one place.  There is no second
++     * copy of that logic here, no raw my_context->signals[] read, and no
++     * numeric 0/1 handed to RunFunctionHandler (which would have meant "SIG_DFL
++     * / SIG_IGN" by accident rather than by decision).
++     *
++     * `native_uc` is NULL: this delivery has no real host ucontext, so a NATIVE
++     * handler reached here is given NULL -- the honest context boundary.  No
++     * register file is fabricated and nothing pretends a translation of the
++     * native PC is a guest PC.  The delivered guest state is box64's own x86
++     * state at R_RIP, which is what a guest handler must see.  Being NULL, this
++     * delivery is also correctly NOT treated as a real hardware fault by the
++     * guest worker's resume guard.
++     *
++     * variant -1: no kernel entry variant was taken for a synthetic signal. */
+     siginfo_t info = { 0 };
+     info.si_signo = X64_SIGSEGV;
+     info.si_errno = 0xdead;
+     info.si_code = num;
+     info.si_addr = NULL; // addr;
+-    const char* x64name = NULL;
+-    const char* elfname = NULL;
+     if (BOX64ENV(log) > LOG_INFO || BOX64ENV(dynarec_dump) || BOX64ENV(showsegv)) {
+-        x64name = getAddrFunctionName(R_RIP);
++        const char* x64name = getAddrFunctionName(R_RIP);
+         elfheader_t* elf = FindElfAddress(my_context, R_RIP);
+-        if (elf)
+-            elfname = ElfName(elf);
++        const char* elfname = elf ? ElfName(elf) : NULL;
+         printf_log(LOG_NONE, "Emit Interruption 0x%x at IP=%p(%s / %s) / addr=%p\n", num, (void*)R_RIP, x64name ? x64name : "???", elfname ? elfname : "?", addr);
+     }
+-    if(box64_is32bits)
+-        my_sigactionhandler_oldcode(emu, X64_SIGSEGV, 0, &info, NULL, NULL, NULL, R_RIP);
+-    else {
+-        uintptr_t frame = R_RSP;
+-        int sig = X64_SIGSEGV;
+-        // stack tracking
+-        x64_stack_t *new_ss = my_context->onstack[sig]?sigstack_getstack():NULL;
+-        int used_stack = 0;
+-        if(new_ss) {
+-            if(new_ss->ss_flags == SS_ONSTACK) { // already using it!
+-                frame = ((uintptr_t)emu->regs[_SP].q[0] - 128) & ~0x0f;
+-            } else {
+-                frame = (uintptr_t)(((uintptr_t)new_ss->ss_sp + new_ss->ss_size - 16) & ~0x0f);
+-                used_stack = 1;
+-                new_ss->ss_flags = SS_ONSTACK;
+-            }
+-        } else {
+-            frame -= 0x200; // redzone
+-        }
+-
+-        // TODO: do I need to really setup 2 stack frame? That doesn't seems right!
+-        // setup stack frame
+-        frame -= 512+64+16*16;
+-        void* xstate = (void*)frame;
+-        frame -= sizeof(siginfo_t);
+-        siginfo_t* info2 = (siginfo_t*)frame;
+-        memcpy(info2, &info, sizeof(siginfo_t));
+-        // try to fill some sigcontext....
+-        frame -= sizeof(x64_ucontext_t);
+-        x64_ucontext_t   *sigcontext = (x64_ucontext_t*)frame;
+-        // get general register
+-        sigcontext->uc_mcontext.gregs[X64_R8] = R_R8;
+-        sigcontext->uc_mcontext.gregs[X64_R9] = R_R9;
+-        sigcontext->uc_mcontext.gregs[X64_R10] = R_R10;
+-        sigcontext->uc_mcontext.gregs[X64_R11] = R_R11;
+-        sigcontext->uc_mcontext.gregs[X64_R12] = R_R12;
+-        sigcontext->uc_mcontext.gregs[X64_R13] = R_R13;
+-        sigcontext->uc_mcontext.gregs[X64_R14] = R_R14;
+-        sigcontext->uc_mcontext.gregs[X64_R15] = R_R15;
+-        sigcontext->uc_mcontext.gregs[X64_RAX] = R_RAX;
+-        sigcontext->uc_mcontext.gregs[X64_RCX] = R_RCX;
+-        sigcontext->uc_mcontext.gregs[X64_RDX] = R_RDX;
+-        sigcontext->uc_mcontext.gregs[X64_RDI] = R_RDI;
+-        sigcontext->uc_mcontext.gregs[X64_RSI] = R_RSI;
+-        sigcontext->uc_mcontext.gregs[X64_RBP] = R_RBP;
+-        sigcontext->uc_mcontext.gregs[X64_RSP] = R_RSP;
+-        sigcontext->uc_mcontext.gregs[X64_RBX] = R_RBX;
+-        sigcontext->uc_mcontext.gregs[X64_RIP] = R_RIP;
+-        // flags
+-        ResetFlags(emu);
+-        sigcontext->uc_mcontext.gregs[X64_EFL] = emu->eflags.x64;
+-        // get segments
+-        sigcontext->uc_mcontext.gregs[X64_CSGSFS] = ((uint64_t)(R_CS)) | (((uint64_t)(R_GS))<<16) | (((uint64_t)(R_FS))<<32) | (((uint64_t)(R_SS))<<48);
+-        if(R_CS==0x23) {
+-            // trucate regs to 32bits, just in case
+-            #define GO(R)   sigcontext->uc_mcontext.gregs[X64_R##R]&=0xFFFFFFFF
+-            GO(AX);
+-            GO(CX);
+-            GO(DX);
+-            GO(DI);
+-            GO(SI);
+-            GO(BP);
+-            GO(SP);
+-            GO(BX);
+-            GO(IP);
+-            #undef GO
+-        }
+-        // get FloatPoint status
+-        sigcontext->uc_mcontext.fpregs = xstate;//(struct x64_libc_fpstate*)&sigcontext->xstate;
+-        fpu_xsave_mask(emu, xstate, 0, 0b111);
+-        memcpy(&sigcontext->xstate, xstate, sizeof(sigcontext->xstate));
+-        ((struct x64_fpstate*)xstate)->res[12] = 0x46505853;   // magic number to signal an XSTATE type of fpregs
+-        ((struct x64_fpstate*)xstate)->res[13] = 0; // offset to xstate after this?
+-        // get signal mask
+-        if(new_ss) {
+-            sigcontext->uc_stack.ss_sp = new_ss->ss_sp;
+-            sigcontext->uc_stack.ss_size = new_ss->ss_size;
+-            sigcontext->uc_stack.ss_flags = new_ss->ss_flags;
+-        } else
+-            sigcontext->uc_stack.ss_flags = SS_DISABLE;        
+-        // prepare info2
+-        info2->si_errno = 0;
+-        info2->si_code = 128;
+-        info2->si_addr = NULL;
+-        sigcontext->uc_mcontext.gregs[X64_TRAPNO] = 13;
+-        sigcontext->uc_mcontext.gregs[X64_ERR] = 0x02|(num<<3);
+-        int exits = 0;
+-        int ret;
+-        ret = RunFunctionHandler(emu, &exits, 2, sigcontext, my_context->signals[info2->si_signo], 3, info2->si_signo, info2, sigcontext);
+-        if(used_stack)  // release stack
+-            new_ss->ss_flags = 0;
+-        // restore values
+-        // general regs
+-        R_R8 = sigcontext->uc_mcontext.gregs[X64_R8];
+-        R_R9 = sigcontext->uc_mcontext.gregs[X64_R9];
+-        R_R10 = sigcontext->uc_mcontext.gregs[X64_R10];
+-        R_R11 = sigcontext->uc_mcontext.gregs[X64_R11];
+-        R_R12 = sigcontext->uc_mcontext.gregs[X64_R12];
+-        R_R13 = sigcontext->uc_mcontext.gregs[X64_R13];
+-        R_R14 = sigcontext->uc_mcontext.gregs[X64_R14];
+-        R_R15 = sigcontext->uc_mcontext.gregs[X64_R15];
+-        R_RAX = sigcontext->uc_mcontext.gregs[X64_RAX];
+-        R_RCX = sigcontext->uc_mcontext.gregs[X64_RCX];
+-        R_RDX = sigcontext->uc_mcontext.gregs[X64_RDX];
+-        R_RDI = sigcontext->uc_mcontext.gregs[X64_RDI];
+-        R_RSI = sigcontext->uc_mcontext.gregs[X64_RSI];
+-        R_RBP = sigcontext->uc_mcontext.gregs[X64_RBP];
+-        R_RSP = sigcontext->uc_mcontext.gregs[X64_RSP];
+-        R_RBX = sigcontext->uc_mcontext.gregs[X64_RBX];
+-        R_RIP = sigcontext->uc_mcontext.gregs[X64_RIP];
+-        // flags
+-        emu->eflags.x64 = sigcontext->uc_mcontext.gregs[X64_EFL];
+-        // get segments
+-        R_CS = sigcontext->uc_mcontext.gregs[X64_CSGSFS]&0xffff;
+-        R_GS = (sigcontext->uc_mcontext.gregs[X64_CSGSFS]>>16)&0xffff;
+-        R_FS = (sigcontext->uc_mcontext.gregs[X64_CSGSFS]>>32)&0xffff;
+-        R_SS = (sigcontext->uc_mcontext.gregs[X64_CSGSFS]>>48)&0xffff;
+-        // fpu
+-        fpu_xrstor_mask(emu, xstate, 0, 0b111);
+-    }
++    /* box64dl_signal_deliver() never returns for a DEFAULT fatal action; for
++     * every other outcome it returns to its caller, which here is the emulator
++     * loop that continues with the (possibly edited) guest state. */
++    box64dl_signal_deliver(emu, X64_SIGSEGV, &info, NULL, -1, NULL, R_RIP);
+ }
+ 
+--- a/src/dynarec/dynarec.c
++++ b/src/dynarec/dynarec.c
+@@ -310,6 +310,16 @@
+             if ((skip = SigSetJmp(emu->jmpbuf, savemask)))
+             #endif
+             {
++                /* libbox64dl patch 0021: this branch is a signal-driven resume
++                 * (SigSetJmp returned non-zero).  The handler may have edited
++                 * the guest ucontext's uc_sigmask; patch 0005 just restored the
++                 * frame's own policy mask (M0 for COMPAT, M1 for FAST), so the
++                 * guest's explicit edit is applied here, after that restore and
++                 * before the emulator runs again.  Abandoned guest delivery
++                 * frames are dropped in the same call, so no bridge frame can
++                 * keep pointing at a signal stack this thread has left. */
++                extern void box64dl_signal_resume_mask_apply(void);
++                box64dl_signal_resume_mask_apply();
+                 dynarec_log(LOG_DEBUG, "Setjmp EmuRun, fs=0x%x will %sskip dynarec next\n", emu->segs[_FS], (skip==3)?"not ":"");
+                 #ifdef DYNAREC
+                 if(BOX64ENV(dynarec_test)) {

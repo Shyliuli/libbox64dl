@@ -28,9 +28,8 @@ bindgen = "0.72"
 
 # The engine sits behind foreign (C) frames that can `longjmp`; a Rust unwind
 # must never cross that boundary. `panic = "abort"` makes any panic terminate
-# instead of unwinding into C. It does NOT make a foreign longjmp safe (that is
-# a structural rule: no live Rust frame between setjmp and longjmp) — see
-# docs/engine-ownership.md.
+# instead of unwinding into C. It does NOT make a foreign longjmp safe: that is
+# a structural rule — no live Rust frame between setjmp and longjmp.
 [profile.dev]
 panic = "abort"
 

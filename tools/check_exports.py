@@ -78,6 +78,46 @@ REQUIRED_PUBLIC = (
     "box64_native_function",
 )
 
+# Process-wide signal actions (include/libbox64_signal_actions.h). The
+# embedder's controlled native surface for the ONE logical action per host
+# signal that the host and the guest share: the getter reads the current
+# action, the setter installs a NATIVE one.
+#
+# CONDITIONAL, and only because of WHEN the module enters the build. Its engine
+# half is the patch queue (patches/0020 installs the dispatcher from
+# init_signal_helper and defines the dispatch hооk; patches/0021 defines the
+# guest worker), so until both files exist src/signal_actions.c is not an
+# ELFLOADER source and these two symbols cannot exist in any artifact — a DSO
+# link is -Wl,-z,defs. Requiring them unconditionally would make the default
+# `make test` fail on a tree whose engine half simply has not landed yet, which
+# is a false negative about the export table, not a finding about it.
+#
+# The Makefile passes --expect-signal-actions exactly when it has grafted the
+# module, so the gate is strict in every build that actually contains it. The
+# internal half (box64dl_signal_action_*, box64dl_signal_actions_*, the
+# delivery and guest-worker seam) is NEVER an ABI and is rejected
+# unconditionally, by SIGNAL_ACTIONS_INTERNAL below.
+REQUIRED_SIGNAL_ACTIONS = (
+    "box64_signal_action_get",
+    "box64_signal_action_set_native",
+)
+
+# Internal symbols that live in the same module as a public entry point and
+# must never become dynamic: the private native setter/getter, the lifecycle
+# install/rollback, the delivery decision point and the two engine seams the
+# patch queue defines. They fall through the version script's `local: *` rule;
+# listing them proves it, rather than trusting the class rule.
+SIGNAL_ACTIONS_INTERNAL = (
+    "box64dl_signal_action_get",
+    "box64dl_signal_action_set",
+    "box64dl_signal_actions_init",
+    "box64dl_signal_actions_fini",
+    "box64dl_signal_actions_active",
+    "box64dl_signal_deliver",
+    "box64dl_signal_guest_deliver",
+    "box64dl_engine_signal_hook",
+)
+
 # Engine-internal wrapper symbols the runtime resolves through dlsym().  These
 # are exactly the wrapped libc entries the real DT_NEEDED-libc guest consumer
 # exercises; a DSO that does not export them cannot run that guest.
@@ -127,6 +167,12 @@ def main() -> int:
     ap.add_argument("--box64", type=Path, required=True)
     ap.add_argument("--inject-symbol", action="append", default=[],
                     help="negative-test only: add a fake symbol to the observed set")
+    ap.add_argument(
+        "--expect-signal-actions",
+        action="store_true",
+        help="the build grafted src/signal_actions.c, so the two public "
+        "signal-action entries MUST be dynamic (see REQUIRED_SIGNAL_ACTIONS)",
+    )
     ns = ap.parse_args()
 
     box = symbols(ns.box64)
@@ -147,6 +193,11 @@ def main() -> int:
     for name in sorted(box):
         if any(name.startswith(p) for p in NODE_FORBIDDEN_PREFIXES):
             errors.append(f"Node/foreign symbol exported by the engine: {name}")
+    # box64dl_* is not a dynamic class: the class rule catches it through
+    # `leaked` below, and this names the signal-action internals explicitly so a
+    # version script that accidentally globals box64dl_* fails with the reason.
+    for name in sorted(set(SIGNAL_ACTIONS_INTERNAL) & box):
+        errors.append(f"internal signal-action symbol exported: {name}")
     for name in sorted(leaked):
         errors.append(
             "internal symbol exported by the engine (expected only box64_*, "
@@ -155,6 +206,10 @@ def main() -> int:
     for name in REQUIRED_PUBLIC:
         if name not in public:
             errors.append(f"missing public libbox64dl symbol: {name}")
+    if ns.expect_signal_actions:
+        for name in REQUIRED_SIGNAL_ACTIONS:
+            if name not in public:
+                errors.append(f"missing public libbox64dl symbol: {name}")
     for name in REQUIRED_THUNK_API:
         if name not in trampolines:
             errors.append(f"missing runtime-trampoline symbol: {name}")

@@ -7,12 +7,14 @@
 //! `box64dl_core_*` / `endBox64` (which can run guest code and be crossed by a
 //! foreign `siglongjmp`).
 //!
-//! C (`src/libbox64.c`) owns the orchestration and the admission gate:
+//! C (`src/libbox64.c`) owns the orchestration. The caller quiesces all
+//! engine work before fini; no per-call admission gate protects concurrent
+//! teardown:
 //!
 //! ```text
 //!   box64_lib_init:  begin_init -> [C: engine_boot] -> commit_init(x) | fail_init
-//!   box64_lib_fini:  begin_close -> [C: quiesce? endBox64] -> commit_close
-//!   box64_ensure_emu: begin/ensure/release in C
+//!   box64_lib_fini:  begin_close -> [C: endBox64] -> commit_close
+//!   box64_ensure_emu: READY check -> [C: create emu if needed]
 //! ```
 //!
 //! The status codes are stable so C can put the right reason in the error slot:

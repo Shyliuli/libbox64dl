@@ -1,10 +1,9 @@
 /*
  * Lifetime guard regression: a call issued AFTER box64_lib_fini() must be
- * refused even though the calling thread still holds an emu. Rust owns the
- * phase (FINAL after fini) and the C call entry additionally keys its lock-free
- * fast path on the borrow-validity of the C global context pointer (my_context,
- * NULLed by box64's own endBox64()). Before fini the same entries must succeed,
- * which this test also checks, so a guard that refuses everything cannot pass.
+ * refused even though the calling thread previously had an emu. Rust owns the
+ * phase (FINAL after fini), and the C call entry checks readiness before using
+ * any cached emu pointer. Before fini the same entries must succeed, which this
+ * test also checks, so a guard that refuses everything cannot pass.
  *
  * The guard is a sequential lifetime check, not synchronisation: this test
  * never races fini with calls on other threads.

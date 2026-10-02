@@ -1,0 +1,167 @@
+# Signal-action test matrix for tests/test_signal_actions.c
+#
+# Each LINE is one fresh process: the signal-action table and the signal-mask
+# policy default are process-wide and one-shot, so a case can never be reused
+# across policies inside one process. The Makefile target `test-signal-actions`
+# is generated from this list; the columns are
+#
+#   <case>  <BOX64DL_SIGNAL_POLICY>  <modes>  <what it proves>
+#
+# Signals are columns 2 and 3, not a dynarec column and an "extra env" column:
+#   BOX64DL_SIGNAL_POLICY  'fast' | 'compat' | '-' (unset: the engine default)
+#   modes                  'both'   run under BOX64_DYNAREC unset AND =0
+#                          'dynarec' run only with the JIT (no =0 variant:
+#                                    the case needs the dynarec internal repair)
+#                          'single' run once, exactly as written (used by
+#                                    not-init, which must precede box64_lib_init)
+# The runner may add its own env (e.g. MALLOC_PERTURB_) per row; that is not a
+# column because it is not part of the case identity.
+#
+# CASE                     POLICY   MODES   WHAT IT PROVES
+# ---------------------------------------------------------------------------
+alive                      -        both    baseline: the engine + fixture come up
+host-preinit               fast     both    the app's pre-init native action is the initial
+                                             logical action; the guest reads it back as a
+                                             STABLE bridge, calls it (chaining) and restores
+                                             it with a query round trip; a real raise after
+                                             that still reaches the app handler
+host-preinit               compat   both    same, under the COMPAT mask policy
+guest-replace              fast     both    a guest rt_sigaction replaces a native action; a
+                                             real native raise follows the GUEST handler, not
+                                             the old native one; guest IGN/DFL are first-class
+                                             kinds, not "guest"
+guest-replace              compat   both    same, under COMPAT
+native-override            fast     both    one process-wide action: a controlled native update
+                                             overrides a guest action and back; the guest sees
+                                             the native flags/mask; the real delivery follows
+                                             whichever side set it last; generation advances
+native-override            compat   both    same, under COMPAT
+unity                      fast     both    both directions in ONE process, ending on the app's
+                                             native action, with a real delivery for each side
+unity                      compat   both    same, under COMPAT
+roundtrip                  fast     both    handler/flags/restorer/mask all survive a guest
+                                             query -> reinstall -> query (bitmap 0xf), INCLUDING
+                                             SA_RESTORER and the app's restorer ADDRESS, even
+                                             though the engine's own kernel action carries neither
+roundtrip                  compat   both    same, under COMPAT
+not-init                   -        single  runs BEFORE box64_lib_init(): get() and set_native()
+                                             fail with ENOSYS; an out-of-range signal is still
+                                             EINVAL (validation precedes the init check)
+invalid                    fast     both    the header's ERRNO CONTRACT, exactly: EFAULT for a NULL
+                                             out, EINVAL for sig <1 / >64 / _NSIG, and EINVAL for a
+                                             non-NULL act that tries to CHANGE SIGKILL|SIGSTOP,
+                                             ENOTSUP for 32|33 (glibc's pthread signals). An act==NULL
+                                             call is a QUERY, not a refusal: it returns 0, fills *old
+                                             and changes nothing. KILL/STOP QUERY is legal and reads
+                                             DEFAULT. sigsetsize 4/16 refused, 8 accepted.
+                                             Also: flags is (uint64_t)(uint32_t) widened, so
+                                             SA_RESETHAND (0x80000000) must NOT sign-extend into the
+                                             upper 32 bits
+uc-mask                    fast     both    THREE SEPARATE inputs with OPPOSITE required outcomes,
+                                             which conflating them once hid: a guest UCONTEXT
+                                             edit (OR / CLEAR / COMBINED) must SURVIVE; an ordinary
+                                             handler rt_sigprocmask(SIG_BLOCK) addition must be
+                                             CLEARED (same rule as flags-mask); the app's own
+                                             pre-call mask must be PRESERVED unless the uc edit
+                                             explicitly clears it. Identical under
+                                             fast and compat; a mask-only edit is
+                                             NOT required to take the siglongjmp path
+uc-mask                    compat   both    same case under COMPAT: the bitmap must be identical
+                                             to the fast run (that equality IS the assertion)
+longjmp                    fast     both    the CHANGED-CONTEXT resume really is a siglongjmp
+                                             resume, driven by the COMBINED edit (R11 XOR AND
+                                             uc_sigmask OR) that genuinely changes emulator state:
+                                             mask_restores advances, and must NOT advance for a
+                                             null edit. The mask outcome is asserted here too
+longjmp                    compat   both    same deliveries under COMPAT: mask_restores must NOT
+                                             advance (COMPAT restores via siglongjmp itself), while
+                                             the handler's uc_sigmask edit still survives. The
+                                             counter requirement is FAST-ONLY by design
+resethand-race             compat   both    same, under COMPAT
+resethand-race             fast     both    concurrent RESETHAND re-registration under real
+                                             deliveries, on SIGWINCH (DEFAULT-IGNORE): a delivery
+                                             landing between a consumed one-shot and the next
+                                             registration is a LEGAL default delivery and must be
+                                             discarded, not fatal -- using a default-terminating
+                                             signal here would misreport a legal exit as an engine
+                                             failure. No registration may fail for an undocumented
+                                             reason; bounded trylock/pool refusals (-EWOULDBLOCK,
+                                             -ENOMEM) are expected and allowed. After the race
+                                             quiesces a NEW registration must SUCCEED and run its own
+                                             handler exactly once (the stale variant never overrides
+                                             it)
+flags-mask                 fast     both    sa_mask / automatic self-block / SA_NODEFER nesting
+                                             checked from BOTH sides; handler additions never
+                                             leak past the return; SA_SIGINFO changes arity
+flags-mask                 compat   both    same, under COMPAT (the mask restore path differs)
+altstack                   fast     both    SA_ONSTACK lands inside the GUEST's own alt stack and
+                                             inside the APP's own alt stack; SS_ONSTACK is clear
+                                             again afterwards
+altstack                   compat   both    same, under COMPAT
+restart                    fast     both    a real blocked read(2): SA_RESTART clear => -EINTR;
+                                             SA_RESTART set => the read is not reported as
+                                             interrupted and a later byte reaches it; the kernel
+                                             action keeps SA_RESTART for a NATIVE handler
+restart                    compat   both    same, under COMPAT
+resethand                  fast     both    RESETHAND is VIRTUAL: the kernel sa_flags carries no
+                                             reset bit and the engine's dispatcher stays
+                                             installed; the logical action is DEFAULT after one
+                                             delivery; a SECOND delivery is fatal (WTERMSIG);
+                                             RE-REGISTRATION fires each variant exactly once and
+                                             the OLD variant never overrides the new one, with a
+                                             real delivery proving the new handler ran
+resethand                  compat   both    same, under COMPAT
+smc                        fast     dynarec  a real RWX guest page patched in place (42 -> 7):
+                                             the engine's internal protection repair must NOT
+                                             reach the host SIGSEGV action (counter stays 0) and
+                                             must NOT consume the app's RESETHAND action; a
+                                             regular RESETHAND delivery afterwards still consumes
+                                             exactly one shot
+pagefix                    fast     both    a guest SIGSEGV handler raw-mprotect()s a read-only
+                                             page and the guest resumes AT THE FAULTING STORE;
+                                             run on a worker thread (bounded join) and on the
+                                             main thread
+pagefix                    compat   both    same, under COMPAT
+native-fault               fast     both    the GUEST faults while the logical SIGSEGV action is
+                                             NATIVE: the native handler receives a REAL native
+                                             ucontext (non-zero PC, the real si_addr) and repairs
+                                             the page with host mprotect(); the guest resumes AT
+                                             the faulting store. The same fault shape is then
+                                             recovered by a GUEST handler
+native-fault               compat   both    same, under COMPAT
+native-c-fault             fast     both    the MIRROR direction: a HARDWARE FAULT raised by
+                                             NATIVE C code (a bridged host callback the GUEST
+                                             invoked) while the logical SIGSEGV action is a
+                                             GUEST handler. Asserts the native callback's C
+                                             FRAME SURVIVES -- its stack cookie is intact and it
+                                             RETURNS normally, so no guest longjmp skipped it;
+                                             the guest handler ran and repaired the page; the
+                                             store landed. Second direction: the guest handler
+                                             CHAINS to the native action it saved before
+                                             replacing it, passing its GUEST ucontext -- the
+                                             bridged native handler must receive a REAL NATIVE
+                                             ucontext_t whose PC resolves through dladdr() to a
+                                             host module, plus a real siginfo_t
+native-c-fault             compat   both    same, under COMPAT
+chld                       fast     both    SIGCHLD SA_NOCLDWAIT: the child is auto-reaped
+                                             (wait4 => ECHILD) and the handler still runs;
+                                             without it the child is reaped normally; the logical
+                                             query reports the app's flags, not the kernel arming.
+                                             NOTE: NOCLDWAIT's auto-reap is kernel
+                                             behaviour, so this row is settled only
+                                             by a real kernel run — the engine matrix
+concurrent                 fast     both    controlled native updates + concurrent queries +
+                                             real deliveries under MALLOC_PERTURB_, on SIGWINCH
+                                             (DEFAULT-IGNORE) for the same reason as
+                                             resethand-race: a delivery inside a race must never be
+                                             able to produce a legal fatal exit. One published
+                                             variant carries SA_RESETHAND deliberately. Every
+                                             snapshot must match an EXACT published combination;
+                                             generation is monotone; no UAF; no host SIGSEGV
+                                             action. Failures are split into bounded trylock/pool
+                                             refusals (allowed) and undocumented errors (fail)
+concurrent                 compat   both    same, under COMPAT
+fatal                      fast     both    a DEFAULT disposition really terminates a FORKED
+                                             child with the right WTERMSIG (SIGUSR1, and a real
+                                             SIGSEGV fault); the parent's engine survives
+fatal                      compat   both    same, under COMPAT

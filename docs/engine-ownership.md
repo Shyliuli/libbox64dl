@@ -93,10 +93,13 @@ Rust destructor cannot race box64's teardown.
 The private shim (`src/core_shim.c`) is mechanical only: it moves values in and
 out of box64's private structures and calls functions Rust cannot call directly.
 The low-level engine surface (`src/libbox64.c`, `src/signal_policy.c`,
-`src/signal_route.c`, `src/thunk.c`, `thunk_la64.S`) keeps:
+`src/signal_route.c`, `src/signal_actions.c` (host half) and `src/signal_guest.c` (guest
+half), `src/thunk.c`, `thunk_la64.S`) keeps:
 
 - the register file, `Push64`/`Pop64`, `DynaCall`/`DynaCall_abi`;
 - the signal handlers and the per-frame signal-mask policy;
+- the process-wide application signal actions — `fini` on that module requires the caller
+  to have quiesced deliveries first (see [`signal-actions.md`](signal-actions.md));
 - the host-fault routing;
 - the `setjmp`/`longjmp` regions;
 - the lifecycle orchestration and the admission gate.

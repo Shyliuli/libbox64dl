@@ -1,26 +1,15 @@
 /*
- * Teardown/admission regression.
+ * Caller-owned quiescence regression for the real engine.
  *
- * Three properties are exercised against the real engine:
- *
- *   1. box64_lib_fini() called while a guest call is still in flight must
- *      REFUSE: the phase goes to the terminal FINAL state, the context is NOT
- *      freed underneath the running call, and the still-running call completes.
- *   2. A same-thread callback re-entry (the guest calls a host bridge that
- *      calls box64_call_simple again) nests correctly while the outer call is
- *      admitted.
- *   3. After the refusal, a new call fails with a clear error instead of
- *      entering the half-torn engine.
- *
- * The worker blocks inside a host callback (invoked by the guest through
- * g_invoke) until the main thread has run fini; the guest call then returns
- * normally, proving the context was left alive (no force free).
+ * The worker enters a guest call and reenters it from a host callback while
+ * main observes the READY phase. The owner then releases and joins the worker
+ * BEFORE calling box64_lib_fini(). This is the required API sequence, not a
+ * test of unsupported concurrent teardown. Calls after fini still fail.
  */
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 
 #include "libbox64.h"
 
@@ -31,9 +20,9 @@ static void check(int cond, const char* what) {
   g_checks++;
   if (!cond) {
     g_fail = 1;
-    printf("[fini-race] FAIL %s\n", what);
+    printf("[fini-quiescent] FAIL %s\n", what);
   } else {
-    printf("[fini-race] ok   %s\n", what);
+    printf("[fini-quiescent] ok   %s\n", what);
   }
 }
 
@@ -89,18 +78,18 @@ int main(int argc, char** argv) {
   const char* why;
 
   if (argc < 2) {
-    printf("[fini-race] usage: %s <libcall_guest.so>\n", argv[0]);
+    printf("[fini-quiescent] usage: %s <libcall_guest.so>\n", argv[0]);
     return 2;
   }
   box64_diag_set(0);
   if (box64_lib_init() != 0) {
-    printf("[fini-race] engine init: %s\n",
+    printf("[fini-quiescent] engine init: %s\n",
            box64_dlerror() ? box64_dlerror() : "?");
     return 1;
   }
   handle = box64_dlopen(argv[1], RTLD_NOW);
   if (!handle) {
-    printf("[fini-race] dlopen: %s\n",
+    printf("[fini-quiescent] dlopen: %s\n",
            box64_dlerror() ? box64_dlerror() : "?");
     return 1;
   }
@@ -111,7 +100,7 @@ int main(int argc, char** argv) {
   check(g_cb_addr != NULL, "host callback bridged");
 
   if (pthread_create(&th, NULL, worker, NULL) != 0) {
-    printf("[fini-race] pthread_create failed\n");
+    printf("[fini-quiescent] pthread_create failed\n");
     return 1;
   }
 
@@ -121,44 +110,40 @@ int main(int argc, char** argv) {
   check(1, "worker is inside the guest call (blocked in the host callback)");
   check(box64_engine_phase() == 2, "phase READY while the worker runs");
 
-  /* The refused teardown: a call is in flight, so this must NOT free. */
-  box64_lib_fini();
-  check(!box64_is_ready(), "fini refusal leaves the engine not ready");
-  check(box64_engine_phase() == 5, "fini refusal publishes the terminal FINAL phase");
-  why = box64_dlerror();
-  check(why != NULL && strstr(why, "flight") != NULL,
-        "fini refusal explains the in-flight calls");
-
-  /* Post-refusal: new work must fail, and it must fail at admission (the
-   * phase check), not inside a half-torn engine. */
-  {
-    uint64_t out = 0;
-    box64_call_status_t st =
-        box64_call_simple(g_zero_sym, 0, 0, 0, 0, 0, 0, &out);
-    check(st != BOX64_CALL_OK, "call after refusal is not OK");
-    why = box64_dlerror();
-    check(why != NULL, "call after refusal records an error");
-    box64_call_status_t st2 = box64_call_desc(g_zero_sym, NULL, NULL);
-    check(st2 != BOX64_CALL_OK, "descriptor call after refusal refused");
-  }
-
-  /* Let the in-flight call finish. It must still succeed: the context was left
-   * allocated by the refused teardown. */
+  /* The caller drains guest work and callbacks before touching the engine's
+   * shutdown entry. A live worker is not a supported fini input. */
   pthread_mutex_lock(&g_m);
   g_release = 1;
   pthread_cond_broadcast(&g_cv);
   pthread_mutex_unlock(&g_m);
   pthread_join(th, NULL);
-
-  check(g_worker_status == BOX64_CALL_OK,
-        "in-flight guest call completed after refused fini");
-  check(g_worker_rax == 7, "in-flight guest call kept the live context (rax=7)");
+  check(g_worker_status == BOX64_CALL_OK, "guest call finished before fini");
+  check(g_worker_rax == 7, "guest result survives nested callback");
   check(g_reentry_ok, "same-thread callback re-entry nested correctly");
 
+  box64_lib_fini();
+  check(!box64_is_ready(), "fini leaves the engine not ready");
+  check(box64_engine_phase() == 5, "fini publishes terminal FINAL phase");
+  why = box64_dlerror();
+  check(why == NULL, "quiescent fini completes without an engine error");
+
+  /* Sequential use after teardown must be refused before touching a stale
+   * thread-local emu. No concurrent close is part of this contract. */
+  {
+    uint64_t out = 0;
+    box64_call_status_t st =
+        box64_call_simple(g_zero_sym, 0, 0, 0, 0, 0, 0, &out);
+    check(st != BOX64_CALL_OK, "call after fini is not OK");
+    why = box64_dlerror();
+    check(why != NULL, "call after fini records an error");
+    box64_call_status_t st2 = box64_call_desc(g_zero_sym, NULL, NULL);
+    check(st2 != BOX64_CALL_OK, "descriptor call after fini refused");
+  }
+
   if (g_fail) {
-    printf("[fini-race] RESULT: FAIL (%d checks)\n", g_checks);
+    printf("[fini-quiescent] RESULT: FAIL (%d checks)\n", g_checks);
     return 1;
   }
-  printf("[fini-race] RESULT: PASS (%d checks)\n", g_checks);
+  printf("[fini-quiescent] RESULT: PASS (%d checks)\n", g_checks);
   return 0;
 }

@@ -14,7 +14,24 @@
  * fail, so no DT_NEEDED libc guest could run.
  *
  * The dynamic surface has three classes; everything else is local:
- *   - public embed ABI:  box64_*          -> dynamic (consumers link these)
+ *   - public embed ABI:  box64_*          -> dynamic (consumers link these).
+ *                                           The process-wide signal-action
+ *                                           surface (box64_signal_action_get,
+ *                                           box64_signal_action_set_native;
+ *                                           include/libbox64_signal_actions.h)
+ *                                           is covered by this glob, so the
+ *                                           module needs no entry of its own
+ *                                           here. `box64_*` does NOT match the
+ *                                           module's internal half
+ *                                           (box64dl_signal_action_get,
+ *                                           box64dl_signal_actions_init/fini/
+ *                                           active, box64dl_signal_deliver,
+ *                                           box64dl_signal_guest_deliver,
+ *                                           box64dl_engine_signal_hook), which
+ *                                           therefore falls through to the
+ *                                           `local: *` rule and stays out of
+ *                                           the ABI — as intended, and proven
+ *                                           by the negative export gate.
  *   - runtime trampolines: box64dl_thunk_* -> dynamic (the primitive declared
  *                                           by include/box64dl_thunk.h): a
  *                                           guest->host callable thunk cannot
