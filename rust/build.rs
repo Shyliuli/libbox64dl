@@ -50,6 +50,8 @@ fn main() {
             if let Ok(native) = env::var("LIBBOX64_NATIVE_X64") {
                 make.env("LIBBOX64_NATIVE_X64", native);
             }
+        } else if target_arch == "aarch64" {
+            make.env("LIBBOX64DL_ARCH", "aarch64");
         }
         let status = make.status()
             .expect("failed to run make for the vendored engine");
@@ -93,10 +95,16 @@ fn main() {
         .include(root.join("include"))
         .include(box64.join("src/include"))
         .include(box64.join("src"));
-    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("loongarch64") {
-        cc.define("LA64", None);
-    } else {
-        cc.define("X86_64", None);
+    match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("loongarch64") => {
+            cc.define("LA64", None);
+        }
+        Ok("aarch64") => {
+            cc.define("ARM64", None);
+        }
+        _ => {
+            cc.define("X86_64", None);
+        }
     }
     if pic {
         cc.flag("-fPIC");

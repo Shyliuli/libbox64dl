@@ -114,19 +114,59 @@ struct mt_arg {
   uint64_t emu;
 };
 
+/*
+ * Worker rendezvous.
+ *
+ * box64 frees a thread's emu when the thread exits, and an allocator is free to
+ * hand the same address to a later worker. Sampling the emu pointers only after
+ * join() therefore compares recycled addresses and is not a valid "distinct
+ * emu" test — it reports a false failure on allocators that reuse the freed
+ * block. Workers park here, still holding their emu, until the main thread has
+ * sampled every address, so all sampled emus are live at the same time and the
+ * comparison means what it says.
+ */
+static pthread_mutex_t mt_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t mt_cv = PTHREAD_COND_INITIALIZER;
+static int mt_parked;
+static int mt_release;
+
+static void mt_park(void) {
+  pthread_mutex_lock(&mt_mu);
+  mt_parked++;
+  pthread_cond_broadcast(&mt_cv);
+  while (!mt_release) pthread_cond_wait(&mt_cv, &mt_mu);
+  pthread_mutex_unlock(&mt_mu);
+}
+
+static void mt_wait_parked(int want) {
+  pthread_mutex_lock(&mt_mu);
+  while (mt_parked < want) pthread_cond_wait(&mt_cv, &mt_mu);
+  pthread_mutex_unlock(&mt_mu);
+}
+
+static void mt_release_all(void) {
+  pthread_mutex_lock(&mt_mu);
+  mt_release = 1;
+  pthread_cond_broadcast(&mt_cv);
+  pthread_mutex_unlock(&mt_mu);
+}
+
 static void* mt_thread(void* p) {
   struct mt_arg* a = (struct mt_arg*)p;
   int i;
 
   if (box64_ensure_emu() != 0) {
     a->fail = 1;
+    mt_park(); /* keep the rendezvous balanced even on the failure path */
     return NULL;
   }
   a->emu = (uint64_t)(uintptr_t)thread_peek_emu();
   if (!a->emu) {
     a->fail = 1;
+    mt_park();
     return NULL;
   }
+  mt_park(); /* sampled by main only while this worker still holds the emu */
   for (i = 0; i < 500; ++i) {
     uint64_t got = test_simple2(a->add2, a->idx, (uint64_t)i);
     if (got != a->idx + (uint64_t)i) {
@@ -476,15 +516,23 @@ int main(int argc, char** argv) {
       }
       spawned++;
     }
-    for (i = 0; i < spawned; ++i) pthread_join(th[i], NULL);
+    /* Sample every emu while the workers are parked (see mt_park): the
+     * addresses are simultaneously live, so "distinct" is a real property and
+     * not an allocator-recycling artifact. Let them finish afterwards. */
+    if (spawned) mt_wait_parked(spawned);
     for (i = 0; i < spawned; ++i) {
-      char label[64];
-      snprintf(label, sizeof(label), "thread %d: 500 calls on its own emu", i);
-      check(!ma[i].fail, label);
       check(ma[i].emu != 0 && ma[i].emu != (uint64_t)(uintptr_t)emu,
             "thread emu exists and differs from the main emu");
       if (i > 0)
         check(ma[i].emu != ma[i - 1].emu, "each thread has a distinct emu");
+    }
+    mt_release_all();
+    for (i = 0; i < spawned; ++i) pthread_join(th[i], NULL);
+    /* The call results are only final once each worker has returned. */
+    for (i = 0; i < spawned; ++i) {
+      char label[64];
+      snprintf(label, sizeof(label), "thread %d: 500 calls on its own emu", i);
+      check(!ma[i].fail, label);
     }
   }
 

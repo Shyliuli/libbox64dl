@@ -1,7 +1,9 @@
 # libbox64dl
 
 把 box64 从"接管进程的模拟器程序"改造成"可嵌入的库"：宿主进程在自己的地址空间里
-`dlopen` / `dlsym` / 调用 **x86_64 共享库**，宿主本身是 LoongArch 原生代码。
+`dlopen` / `dlsym` / 调用 **x86_64 共享库**，宿主本身是原生代码。宿主 ISA 目前支持
+LoongArch64（最初目标）和 AArch64；两者都走 box64 的原生 dynarec，宿主侧只在
+trampoline 汇编与 GOT hijack 的重定位类型上分叉。
 
 上游 box64 已经能加载任意 x86_64 `.so`（`my_dlopen` / `my_dlsym`），但那条路径只在
 box64 作为程序启动、建立 `my_context` 和线程 emu 之后才可达。libbox64dl 补的就是这段：
@@ -175,8 +177,10 @@ box64dl_thunk_release_range(lo, hi);   /* 模块卸载时整批回收 */
 
 `target` 通常是一小段汇编 shim，把入参整体左移一位、把 `$t0` 补到最前，再进 C 分发函数。
 
-实现上模板由汇编器生成（`thunk_la64.S`）而非手工编码指令，运行时整段 memcpy、只回填
-三个数据字；模板用 `pcaddi` 寻址自己的数据，所以拷到任何地址都能跑、不需要重定位。
+实现上模板由汇编器生成（LoongArch 是 `thunk_la64.S`，AArch64 是 `thunk_aarch64.S`）
+而非手工编码指令，运行时整段 memcpy、只回填三个数据字；模板各自用 PC 相对寻址
+（LoongArch `pcaddi`、AArch64 `adr`）找到自己的数据，所以拷到任何地址都能跑、
+不需要重定位。AArch64 模板把 data0/data1 放进 `x9`/`x10`（对应 `$t0`/`$t1`）。
 代码页通过 memfd 双映射（一份 RW 写、一份 RX 执行），避免在别的线程正执行 thunk 时
 去 mprotect 同一页。
 
@@ -195,6 +199,17 @@ unilib 和 uninode 都建立在这个原语上：前者用它做 `dlsym` 的 hos
 
 两份都开 dynarec。LoongArch dynarec 的 TLS_LE 重定位只在**非 PIC** 构建时出现，
 `-fPIC` 下编译器发的是 TLS_LD，放进共享对象没有问题。开 dynarec 时 guest 侧哈希约快 3 倍。
+
+宿主架构由 `uname -m` 自动选择，`LIBBOX64DL_ARCH` 可覆盖：
+
+| `LIBBOX64DL_ARCH` | 引擎 CMake | 产物目录 |
+| --- | --- | --- |
+| `aarch64`（AArch64 上默认） | `-DARM64=ON`，上游 ARM64 dynarec | `build/`、`build-pic/` |
+| `loongarch64` | `-DLARCH64=ON`，LoongArch dynarec | `build/`、`build-pic/` |
+| `x86_64` | `-DLARCH64=OFF`，仅解释器 | `build-x64/`、`build-pic-x64/` |
+
+LoongArch 的 TLS_LE 约束是那条 dynarec 的非 PIC 特例，AArch64 不适用；AArch64 dynarec
+自身即按 PIC 使用，`build-pic` 同样开 dynarec。
 
 回退有两级，不必都用：
 

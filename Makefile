@@ -16,7 +16,13 @@ BOX64 := $(ROOT)/vendor/box64
 # submodule's HEAD so a moved or uninitialised submodule fails loudly instead of
 # building a different engine than the patch queue was written for.
 BOX64_REF := 7eeb5016493dab4e143d53da50dd47bfb44a9509
-LIBBOX64DL_ARCH ?= $(if $(filter x86_64 amd64,$(shell uname -m)),x86_64,loongarch64)
+# Host/target architecture.
+#   aarch64      ARM64 host, upstream ARM64 dynarec (native)
+#   loongarch64  LARCH64=ON, the original target
+#   x86_64       interpreter-only debug target
+# Detected from `uname -m`; override with LIBBOX64DL_ARCH=... when cross-building.
+HOST_MACHINE ?= $(shell uname -m)
+LIBBOX64DL_ARCH ?= $(if $(filter x86_64 amd64,$(HOST_MACHINE)),x86_64,$(if $(filter aarch64 arm64,$(HOST_MACHINE)),aarch64,loongarch64))
 ARCH_SUFFIX := $(if $(filter x86_64 amd64,$(LIBBOX64DL_ARCH)),-x64,)
 BUILD_STATIC := $(BOX64)/build$(ARCH_SUFFIX)
 BUILD_PIC := $(BOX64)/build-pic$(ARCH_SUFFIX)
@@ -77,17 +83,27 @@ endif
 # LIBBOX64DL_ARCH=x86_64 when cross-building on LoongArch (or use the native
 # default on an x86_64 host).  The x64-only build is intentionally interpreter
 # first: it is a useful gdb/debug artifact before a native CPU backend exists.
+# On aarch64 the engine is the upstream ARM64 dynarec, selected with -DARM64=ON.
 LIBBOX64_NATIVE_X64 ?= OFF
 ifneq ($(filter x86_64 amd64,$(LIBBOX64DL_ARCH)),)
 THUNK_ASM := $(ROOT)/src/thunk_x64.S
+THUNK_SHIM_ASM := $(ROOT)/tests/test_thunk_shim.S
 ARCH_CMAKE := -DLARCH64=OFF
 NATIVE_CALL_SRC := $(if $(filter ON on 1,$(LIBBOX64_NATIVE_X64)),$(ROOT)/src/native_call_x64.S,)
 NATIVE_CFLAGS := $(if $(NATIVE_CALL_SRC),-DBOX64_X64_NATIVE=1,)
+else ifneq ($(filter aarch64 arm64,$(LIBBOX64DL_ARCH)),)
+NATIVE_CALL_SRC :=
+NATIVE_CFLAGS :=
+
+THUNK_ASM := $(ROOT)/src/thunk_aarch64.S
+THUNK_SHIM_ASM := $(ROOT)/tests/test_thunk_shim_aarch64.S
+ARCH_CMAKE := -DARM64=ON -DLARCH64=OFF
 else
 NATIVE_CALL_SRC :=
 NATIVE_CFLAGS :=
 
 THUNK_ASM := $(ROOT)/src/thunk_la64.S
+THUNK_SHIM_ASM := $(ROOT)/tests/test_thunk_shim.S
 ARCH_CMAKE := -DLARCH64=ON
 endif
 
@@ -921,7 +937,7 @@ bench-signal-policy: $(TEST_BENCH_SIGNAL)
 	$(TEST_BENCH_SIGNAL) $(GUEST_CALL_SO) 200000 --library-policy compat \
 		--json build/test-results/performance.json >/dev/null
 
-build/test_thunk: tests/test_thunk.c tests/test_thunk_shim.S src/thunk.c src/thunk_la64.S src/diag.c
+build/test_thunk: tests/test_thunk.c $(THUNK_SHIM_ASM) src/thunk.c $(THUNK_ASM) src/diag.c
 	@mkdir -p build
 	$(CC) -Og -g -std=c11 -Wall -Wextra -Iinclude -o $@ $^ -lpthread
 
