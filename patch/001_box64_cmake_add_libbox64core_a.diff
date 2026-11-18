@@ -1,0 +1,42 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ed5c3ba21..59808b367 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1354,7 +1354,37 @@ add_library(interpreter OBJECT ${INTERPRETER})
+ add_library(mainobj OBJECT ${OS_LINUX_SRC} ${ELFLOADER_SRC} ${WRAPPEDS} ${WRAPPEDS32})
+ add_dependencies(mainobj generate_git_head_target)
+ add_dependencies(mainobj generate_dynacache_hashes)
++# object: libbox64core.a
++set(BOX64_CORE_OBJECTS
++    $<TARGET_OBJECTS:mainobj>
++    $<TARGET_OBJECTS:interpreter>
++)
++
++if(DYNAREC)
++    list(APPEND BOX64_CORE_OBJECTS
++        $<TARGET_OBJECTS:dynarec_native>
++        $<TARGET_OBJECTS:native_pass0>
++        $<TARGET_OBJECTS:native_pass1>
++        $<TARGET_OBJECTS:native_pass2>
++        $<TARGET_OBJECTS:native_pass3>
++        $<TARGET_OBJECTS:test_interpreter>
++    )
++endif()
++
++add_library(box64core STATIC ${BOX64_CORE_OBJECTS})
+ 
++add_dependencies(box64core mainobj interpreter)
++
++if(DYNAREC)
++    add_dependencies(box64core
++        dynarec_native
++        native_pass0
++        native_pass1
++        native_pass2
++        native_pass3
++        test_interpreter
++    )
++endif()
+ if(NOT NOBOX64)
+     add_executable(${BOX64})
+     target_link_libraries(${BOX64} mainobj)
