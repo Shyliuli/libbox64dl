@@ -11,6 +11,7 @@ name = "test-driver"
 path = "test.rs"
 
 [dependencies]
+abi-plan = { git = "https://github.com/Shyliuli/abi-plan.git" }
 
 [build-dependencies]
 cmake = "0.1.58"
