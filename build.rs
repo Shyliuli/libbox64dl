@@ -14,10 +14,11 @@ fn main() {
         .expect("CARGO_CFG_TARGET_ARCH 未设置");
 
     let platform_flag = match target_arch.as_str() {
-        "loongarch64" => "LARCH64",
-        "aarch64" => "ARM64",
-        "riscv64" => "RV64",
-        "powerpc64" => "PPC64LE",
+        "loongarch64" => Some("LARCH64"),
+        "aarch64" => Some("ARM64"),
+        "riscv64" => Some("RV64"),
+        "powerpc64" => Some("PPC64LE"),
+        "x86_64" => None,
         other => panic!("暂不支持的架构: {other}"),
     };
     let cargo_profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
@@ -27,13 +28,18 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR 未设置"));
     let source_dir = prepare_source(&out_dir);
 
-    let dst = cmake::Config::new(source_dir)
+    let mut cmake = cmake::Config::new(source_dir);
+    cmake
         .define("NOBOX64", "ON")
-        .define(platform_flag, "ON")
         .define("CMAKE_BUILD_TYPE", cmake_profile)
-        .define("CMAKE_POSITION_INDEPENDENT_CODE", "ON")
-        .build_target("box64core")
-        .build();
+        .define("CMAKE_POSITION_INDEPENDENT_CODE", "ON");
+    if let Some(flag) = platform_flag {
+        cmake.define(flag, "ON");
+    } else {
+        // x86_64 上按 box64 官方 x86_64 Linux 配置走纯解释器
+        cmake.define("LD80BITS", "ON").define("NOALIGN", "ON");
+    }
+    let dst = cmake.build_target("box64core").build();
 
     println!("cargo:rustc-link-search=native={}/build", dst.display());
     println!("cargo:rustc-link-lib=static=box64core");
