@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 fn main() {
     println!("cargo:rerun-if-changed=third_party/box64");
     println!("cargo:rerun-if-changed=patch");
+    println!("cargo:rerun-if-changed=src/init.c");
+    println!("cargo:rerun-if-changed=Makefile");
 
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH")
         .expect("CARGO_CFG_TARGET_ARCH 未设置");
@@ -40,6 +42,11 @@ fn main() {
         cmake.define("LD80BITS", "ON").define("NOALIGN", "ON");
     }
     let dst = cmake.build_target("box64core").build();
+
+    let status = Command::new("make").arg("build").status().unwrap();
+    assert!(status.success(), "make build 失败");
+    let init_obj = PathBuf::from("target/c/init.o").canonicalize().unwrap();
+    println!("cargo:rustc-link-arg={}", init_obj.display());
 
     println!("cargo:rustc-link-search=native={}/build", dst.display());
     println!("cargo:rustc-link-lib=static=box64core");
