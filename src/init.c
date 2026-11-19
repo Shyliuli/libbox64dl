@@ -12,7 +12,7 @@
 #include "x64emu_private.h"
 
 extern char **environ;
-
+//TODO: 我们需要一个好办法去理解那个贼长的init，现在这个是llm抽出来的“能跑的最小子集”
 int global_init(void)
 {
     //TODO: 这里理论上需要串行，且只能调用一次
@@ -42,6 +42,7 @@ int global_init(void)
 int thread_init(void)
 {
     // 这里需要 per-thread 调用
+    // TODO:我们还在用一个“不可能发生”的防御性代码做初始化...
     if (!thread_get_emu())
         return -1;
     return 0;
