@@ -7,11 +7,20 @@ use std::process::{Command, Stdio};
 
 
 fn main() {
+    let mut c_include_path = env::var("C_INCLUDE_PATH").unwrap_or_default();
+    for dir in ["src", "tests", "third_party/box64/src", "third_party/box64/src/include", "third_party/box64/src/emu"] {
+        if !c_include_path.is_empty() {
+            c_include_path.push(':');
+        }
+        c_include_path.push_str(&Path::new(dir).canonicalize().unwrap().to_string_lossy());
+    }
+    unsafe { env::set_var("C_INCLUDE_PATH", c_include_path) };
+
     println!("cargo:rerun-if-changed=third_party/box64");
     println!("cargo:rerun-if-changed=patch");
-    println!("cargo:rerun-if-changed=src/init.c");
-    println!("cargo:rerun-if-changed=Makefile");
-
+    println!("cargo:rerun-if-changed=src/box64dl_cinclude.h");
+    println!("cargo:rerun-if-changed=src/box64dl_bindgen.h");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR 未设置"));
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH")
         .expect("CARGO_CFG_TARGET_ARCH 未设置");
 
@@ -23,11 +32,14 @@ fn main() {
         "x86_64" => None,
         other => panic!("暂不支持的架构: {other}"),
     };
+    write_public_header();
+    generate_bindings(&out_dir, platform_flag);
+    ya_c_inline_build::Builder::new().always_inline(true).setup();
+
     let cargo_profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     let cmake_profile = if cargo_profile == "release" { "Release" } else { "Debug" };
 
     // 复制box64代码到target/.../box64-src，并应用patch
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR 未设置"));
     let source_dir = prepare_source(&out_dir);
 
     let mut cmake = cmake::Config::new(source_dir);
@@ -43,10 +55,7 @@ fn main() {
     }
     let dst = cmake.build_target("box64core").build();
 
-    let status = Command::new("make").arg("build").status().unwrap();
-    assert!(status.success(), "make build 失败");
-    let init_obj = PathBuf::from("target/c/init.o").canonicalize().unwrap();
-    println!("cargo:rustc-link-arg={}", init_obj.display());
+
 
     println!("cargo:rustc-link-search=native={}/build", dst.display());
     println!("cargo:rustc-link-lib=static=box64core");
@@ -157,4 +166,36 @@ fn apply_patches(source_dir: &Path) {
             patch.display()
         );
     }
+}
+
+fn write_public_header() {
+    let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    cbindgen::Builder::new()
+        .with_crate(crate_dir)
+        .with_language(cbindgen::Language::C)
+        .with_include_guard("BOX64DL_H_")
+        .with_parse_deps(true)
+        .with_parse_include(&["abi-plan"])
+        .generate()
+        .expect("无法生成 src/box64.h")
+        .write_to_file("src/box64.h");
+}
+
+fn generate_bindings(out_dir: &Path, platform_flag: Option<&str>) {
+    let header = PathBuf::from("src/box64dl_bindgen.h");
+    let mut builder = bindgen::Builder::default()
+        .header(header.to_string_lossy())
+        .clang_arg("-Ithird_party/box64/src/include")
+        .allowlist_file(r"(.*/)?(box64dl_bindgen|box64context|env|sysinfo)\.h")
+        .rust_target(bindgen::RustTarget::stable(82, 0).unwrap())
+        .opaque_type(".*")
+        .layout_tests(false);
+    if let Some(flag) = platform_flag {
+        builder = builder.clang_arg(format!("-D{flag}"));
+    }
+    builder
+        .generate()
+        .unwrap()
+        .write_to_file(out_dir.join("box64_bindings.rs"))
+        .unwrap();
 }

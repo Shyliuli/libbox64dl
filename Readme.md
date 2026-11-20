@@ -6,7 +6,7 @@ loading and emulation.
 
 ## use
 
-Build:
+Build (requires the `ya_c_inline` repository alongside this one):
 
 ```bash
 cargo build

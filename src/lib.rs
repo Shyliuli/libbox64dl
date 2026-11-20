@@ -1,45 +1,60 @@
-use abi_plan::{AbiPlanError, CType, Plan, Register, get_plan};
+use abi_plan::{AbiPlanError, Plan, Register};
+use cinline::*;
 use std::ffi::*;
-/*这里之后要进行很多包装...现在先跑起来*/
-#[allow(non_snake_case)]
-unsafe extern "C" {
-    fn global_init() -> c_int;
-    fn thread_init() -> c_int;
-
-    fn thread_get_emu() -> *mut c_void;
-    fn my_dlopen(emu: *mut c_void, filename: *const c_char, flag: c_int) -> *mut c_void;
-    fn my_dlsym(emu: *mut c_void, handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn my_dlclose(emu: *mut c_void, handle: *mut c_void) -> c_int;
-
-    fn SetRDI(emu: *mut c_void, value: u64);
-    fn SetRSI(emu: *mut c_void, value: u64);
-    fn SetRDX(emu: *mut c_void, value: u64);
-    fn SetRCX(emu: *mut c_void, value: u64);
-    fn SetRAX(emu: *mut c_void, value: u64);
-    fn box64_set_r8(emu: *mut c_void, value: u64);
-    fn box64_set_r9(emu: *mut c_void, value: u64);
-    fn GetRAX(emu: *mut c_void) -> u64;
-    fn DynaCall(emu: *mut c_void, addr: usize, no_alt: c_int);
+use std::sync::OnceLock;
+#[allow(dead_code, non_camel_case_types, non_upper_case_globals, non_snake_case)]
+mod bindings {
+    include!(concat!(env!("OUT_DIR"), "/box64_bindings.rs"));
+}
+use bindings::*;
+cinclude! {
+    #include "box64dl_cinclude.h"
+}
+cmod!{
+void box64_set_r8(x64emu_t* emu, uint64_t value)
+{
+    R_R8 = value;
+}
+void box64_set_r9(x64emu_t* emu, uint64_t value)
+{
+    R_R9 = value;
+}
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn box64dl_get_plan(
-    args: *const CType,
-    len: c_int,
-    result: CType,
-    plan: *mut Plan,
-) -> AbiPlanError {
-    unsafe { get_plan(args, len, result, plan) }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn box64dl_init() {
-    /*box64的init超级长，并且很多是针对“运行一个程序”的*/
+fn global_init() -> i32 {
     unsafe {
-        global_init();
-        thread_init();
+        init_guestalloc();
+        if init_auxval(0, std::ptr::null_mut(), environ) != 0 {
+            return -1;
+        }
+        c! {
+            long pagesize = sysconf(_SC_PAGESIZE);
+            box64_pagesize = pagesize > 0 ? pagesize : 4096;
+        };
+        LoadEnvVariables();
+        if NewBox64Context(1).is_null() {
+            return -1;
+        }
+        c! {
+            box64context_t* ctx = my_context;
+            ctx->argv[0] = "box64dl";
+            ctx->envv = environ;
+            for (ctx->envc = 0; environ[ctx->envc]; ++ctx->envc) {}
+        };
+        InitializeEnvFiles();
+        InitializeSystemInfo();
+        0
     }
 }
+#[unsafe(no_mangle)]
+unsafe extern "C" fn box64dl_init() {
+    static INIT_RESULT: OnceLock<i32> = OnceLock::new();
+    if *INIT_RESULT.get_or_init(global_init) == 0 {
+        // todo: 做真正的线程初始化
+        unsafe { thread_get_emu() };
+    }
+}
+
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn box64dl_dlopen(path: *const c_char, flags: c_int) -> *mut c_void {
@@ -86,7 +101,7 @@ unsafe extern "C" fn box64dl_call(
     }
 
     unsafe {
-        let plan:&Plan = &plan.as_ref().unwrap();
+        let plan: &Plan = &plan.as_ref().unwrap();
         let write_result = match plan.result {
             Register::None => false,
             Register::Rax => true,
@@ -101,9 +116,7 @@ unsafe extern "C" fn box64dl_call(
         for (i, arg) in plan.args.iter().enumerate() {
             let value = match arg {
                 Register::None => break,
-                _ => {
-                    *args.add(i)
-                }
+                _ => *args.add(i),
             };
             match arg {
                 Register::Rdi => SetRDI(emu, value),
@@ -114,7 +127,7 @@ unsafe extern "C" fn box64dl_call(
                 Register::R9 => box64_set_r9(emu, value),
                 Register::Rax => SetRAX(emu, value),
                 /*None 已经退出了，其他的报错*/
-                _=> return AbiPlanError::NotSupport,
+                _ => return AbiPlanError::NotSupport,
             }
         }
 
