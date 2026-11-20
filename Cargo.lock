@@ -38,6 +38,16 @@ version = "0.1.0"
 dependencies = [
  "abi-plan",
  "cmake",
+ "ya-c-inline",
+]
+
+[[package]]
+name = "proc-macro2"
+version = "1.0.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+dependencies = [
+ "unicode-ident",
 ]
 
 [[package]]
@@ -45,3 +55,17 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "unicode-ident"
+version = "1.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "ya-c-inline"
+version = "0.1.0"
+source = "git+https://github.com/Shyliuli/ya_c_inline.git#703a1dbc78073c875359cbc6fd20864df537102d"
+dependencies = [
+ "proc-macro2",
+]
