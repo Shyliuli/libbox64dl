@@ -4,6 +4,10 @@
 #include <unistd.h>
 #include "auxval.h"
 #include "box64context.h"
+#include "os.h"
+#include "custommem.h"
+#include "x64emu.h"
+#include "x64tls.h"
 #include "box64cpu.h"
 #include "box64cpu_util.h"
 #include "debug.h"
@@ -18,3 +22,5 @@ void *my_dlsym(x64emu_t *emu, void *handle, const char *symbol);
 int my_dlclose(x64emu_t *emu, void *handle);
 void box64_set_r8(x64emu_t *emu, uint64_t value);
 void box64_set_r9(x64emu_t *emu, uint64_t value);
+void addLibPaths(box64context_t* context);
+void LoadLDPath(box64context_t* context);

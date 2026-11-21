@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "box64context.h"
+#include "os.h"
+#include "custommem.h"
+#include "x64emu.h"
+#include "x64tls.h"
 #include "env.h"
 #include "sysinfo.h"
 
@@ -22,5 +26,7 @@ void box64_set_r8(x64emu_t *emu, uint64_t value);
 void box64_set_r9(x64emu_t *emu, uint64_t value);
 uint64_t GetRAX(x64emu_t *emu);
 void DynaCall(x64emu_t *emu, uintptr_t addr, int no_alt);
+void addLibPaths(box64context_t* context);
+void LoadLDPath(box64context_t* context);
 
 #endif
