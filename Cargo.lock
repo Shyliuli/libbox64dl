@@ -67,6 +67,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -288,6 +294,7 @@ name = "libbox64dl"
 version = "0.1.0"
 dependencies = [
  "abi-plan",
+ "anyhow",
  "bindgen",
  "cbindgen",
  "cmake",
@@ -625,7 +632,7 @@ checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 [[package]]
 name = "ya-c-inline"
 version = "0.1.0"
-source = "git+https://github.com/Shyliuli/ya_c_inline.git#134ecaca87da2f960429835f21d3df9267b81d22"
+source = "git+https://github.com/Shyliuli/ya_c_inline.git#309d1747cc4a587facf0f817b8921201aae1126d"
 dependencies = [
  "proc-macro2",
 ]
@@ -633,7 +640,7 @@ dependencies = [
 [[package]]
 name = "ya-c-inline-build"
 version = "0.1.0"
-source = "git+https://github.com/Shyliuli/ya_c_inline.git#134ecaca87da2f960429835f21d3df9267b81d22"
+source = "git+https://github.com/Shyliuli/ya_c_inline.git#309d1747cc4a587facf0f817b8921201aae1126d"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -12,6 +12,7 @@ path = "test.rs"
 
 [dependencies]
 abi-plan = { git = "https://github.com/Shyliuli/abi-plan.git" }
+anyhow = "1.0.104"
 cinline = { package = "ya-c-inline", git = "https://github.com/Shyliuli/ya_c_inline.git" }
 
 [build-dependencies]
