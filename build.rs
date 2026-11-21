@@ -186,7 +186,6 @@ fn generate_bindings(out_dir: &Path, platform_flag: Option<&str>) {
     let mut builder = bindgen::Builder::default()
         .header(header.to_string_lossy())
         .clang_arg("-Ithird_party/box64/src/include")
-        .allowlist_file(r"(.*/)?(box64dl_bindgen|box64context|env|sysinfo)\.h")
         .rust_target(bindgen::RustTarget::stable(82, 0).unwrap())
         .opaque_type(".*")
         .layout_tests(false);
