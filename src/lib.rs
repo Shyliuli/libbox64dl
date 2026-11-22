@@ -1,10 +1,15 @@
 use abi_plan::{AbiPlanError, Plan, Register};
+use anyhow::*;
 use cinline::*;
 use std::ffi::*;
 use std::sync::OnceLock;
-use anyhow::*;
 
-#[allow(dead_code, non_camel_case_types, non_upper_case_globals, non_snake_case)]
+#[allow(
+    dead_code,
+    non_camel_case_types,
+    non_upper_case_globals,
+    non_snake_case
+)]
 mod bindings {
     include!(concat!(env!("OUT_DIR"), "/box64_bindings.rs"));
 }
@@ -12,7 +17,7 @@ use bindings::*;
 cinclude! {
     #include "box64dl_cinclude.h"
 }
-cmod!{
+cmod! {
 void box64_set_r8(x64emu_t* emu, uint64_t value)
 {
     R_R8 = value;
@@ -24,45 +29,58 @@ void box64_set_r9(x64emu_t* emu, uint64_t value)
 }
 
 fn thread_init() -> Result<()> {
-    // 已有emu
     if !unsafe { thread_get_emu_no_create() }.is_null() {
         return Ok(());
     }
 
-    let status:i32= unsafe{c! { -> i32
-        const int stack_size = 2 * 1024 * 1024;
-        const int prot = PROT_READ | PROT_WRITE;
-        void *stack = InternalMmap(NULL, stack_size, prot,
-            MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0);
-        if (stack == MAP_FAILED) {
-            return -1;
-        }
+    const STACK_SIZE: usize = 2 * 1024 * 1024;
+    let mut stack: usize = 0;
+    let mut emu: *mut x64emu_t = std::ptr::null_mut();
 
-        setProtection_stack((uintptr_t)stack, stack_size, prot);
-        x64emu_t *emu = NewX64Emu(
-            my_context, my_context->exit_bridge,
-            (uintptr_t)stack, stack_size, 1);
+    let status: i32 = unsafe {
+        c! {
+            (STACK_SIZE:usize, stack:usize, emu:*mut x64emu_t) -> i32
+            const int prot = PROT_READ | PROT_WRITE;
+
+            stack = (uintptr_t)InternalMmap(NULL, STACK_SIZE, prot,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0);
+            if (stack == (uintptr_t)MAP_FAILED) return -1;
+
+            setProtection_stack(stack, STACK_SIZE, prot);
+
+            emu = NewX64Emu(my_context, my_context->exit_bridge,
+                            (uintptr_t)stack, STACK_SIZE, 1);
+            if (emu == NULL) {
+                InternalMunmap((void*)stack, STACK_SIZE);
+                return -2;
+            }
+            return 0;
+        }
+    };
+
+    match status {
+        0 => {}
+        -1 => bail!("failed to allocate guest stack (mmap)"),
+        -2 => bail!("NewX64Emu returned NULL"),
+        n => bail!("thread_init failed with unknown status {n}"),
+    }
+
+    unsafe {
         refreshTLSData(emu);
         thread_set_emu(emu);
-        return 0;
-    }};
-
-    if status != 0 {
-        bail!("failed to allocate the Box64 guest stack");
     }
     Ok(())
-} 
-fn init()->Result<()>{
+}
+fn init() -> Result<()> {
     static INIT_RESULT: OnceLock<i32> = OnceLock::new();
     if *INIT_RESULT.get_or_init(global_init) == 0 {
         thread_init()?;
         Ok(())
-    }
-    else{
+    } else {
         bail!("box64dl init failed")
     }
 }
-fn global_init() -> i32{
+fn global_init() -> i32 {
     unsafe {
         init_guestalloc();
         if init_auxval(0, std::ptr::null_mut(), environ) != 0 {
@@ -77,7 +95,7 @@ fn global_init() -> i32{
         if NewBox64Context(1).is_null() {
             return -1;
         }
-        let mut ctx:*mut box64context_t=std::ptr::null_mut();
+        let mut ctx: *mut box64context_t = std::ptr::null_mut();
         c! {(ctx:*mut box64context_t)
             ctx = my_context;
             ctx->argv[0] = "box64dl";
@@ -92,18 +110,15 @@ fn global_init() -> i32{
     }
 }
 #[unsafe(no_mangle)]
-unsafe extern "C" fn box64dl_init()->i32 {
-    match init(){
-        Result::Ok(_) => {
-            0
-        },
+unsafe extern "C" fn box64dl_init() -> i32 {
+    match init() {
+        Result::Ok(_) => 0,
         Err(e) => {
             eprintln!("{e}");
             -1
         }
     }
 }
-
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn box64dl_dlopen(path: *const c_char, flags: c_int) -> *mut c_void {

@@ -248,9 +248,9 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "hashbrown"
-version = "0.17.1"
+version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 
 [[package]]
 name = "heck"
@@ -577,9 +577,9 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.5+spec-1.1.0"
+version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
+checksum = "e6769c452d71ba30696c6b37770c439a9cc9110f47f7d5cdbeda79840ef5ea31"
 dependencies = [
  "winnow 1.0.5",
 ]
@@ -632,7 +632,7 @@ checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 [[package]]
 name = "ya-c-inline"
 version = "0.1.0"
-source = "git+https://github.com/Shyliuli/ya_c_inline.git#309d1747cc4a587facf0f817b8921201aae1126d"
+source = "git+https://github.com/Shyliuli/ya_c_inline.git#61ee38565b7527a5017fa2c22aa9583fa624b703"
 dependencies = [
  "proc-macro2",
 ]
@@ -640,7 +640,7 @@ dependencies = [
 [[package]]
 name = "ya-c-inline-build"
 version = "0.1.0"
-source = "git+https://github.com/Shyliuli/ya_c_inline.git#309d1747cc4a587facf0f817b8921201aae1126d"
+source = "git+https://github.com/Shyliuli/ya_c_inline.git#61ee38565b7527a5017fa2c22aa9583fa624b703"
 dependencies = [
  "proc-macro2",
  "quote",
