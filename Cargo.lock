@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "abi-plan"
 version = "0.1.0"
-source = "git+https://github.com/Shyliuli/abi-plan.git#83904aea3d1d0cde736df39b6a79913b86f6d1f3"
+source = "git+https://github.com/Shyliuli/abi-plan.git#9ee92b8f015fcaea2cb3665d496403ac721ec6c7"
 
 [[package]]
 name = "aho-corasick"

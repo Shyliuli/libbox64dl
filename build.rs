@@ -170,12 +170,25 @@ fn apply_patches(source_dir: &Path) {
 
 fn write_public_header() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    // C 的枚举常量共享同一命名空间，`CType::Void` 与 `Allocation::Void` 会重名，
+    // 因此给枚举常量加上枚举名前缀。
+    let config = cbindgen::Config {
+        language: cbindgen::Language::C,
+        include_guard: Some("BOX64DL_H_".to_owned()),
+        parse: cbindgen::ParseConfig {
+            parse_deps: true,
+            include: Some(vec!["abi-plan".to_owned()]),
+            ..Default::default()
+        },
+        enumeration: cbindgen::EnumConfig {
+            prefix_with_name: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     cbindgen::Builder::new()
         .with_crate(crate_dir)
-        .with_language(cbindgen::Language::C)
-        .with_include_guard("BOX64DL_H_")
-        .with_parse_deps(true)
-        .with_parse_include(&["abi-plan"])
+        .with_config(config)
         .generate()
         .expect("无法生成 src/box64.h")
         .write_to_file("src/box64.h");
