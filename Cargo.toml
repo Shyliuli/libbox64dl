@@ -7,12 +7,14 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [[bin]]
-
+name = "test-driver"
+path = "test.rs"
 
 [dependencies]
 abi-plan = { git = "https://github.com/Shyliuli/abi-plan.git" }
 anyhow = "1.0.104"
+cinline = { package = "ya-c-inline", git = "https://github.com/Shyliuli/ya_c_inline.git" }
 
 [build-dependencies]
-bindgen = "0.72"
 cmake = "0.1.58"
+ya-c-inline-build = { git = "https://github.com/Shyliuli/ya_c_inline.git" }

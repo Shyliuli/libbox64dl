@@ -1,3 +1,4 @@
 [submodule "third_party/box64"]
 	path = third_party/box64
-	url = https://github.com/ptitSeb/box64.git
+	url = https://github.com/Shyliuli/box64.git
+	branch = libbox64dl
