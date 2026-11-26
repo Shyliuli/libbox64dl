@@ -1,3 +1,4 @@
+use abi_plan::*;
 use anyhow::*;
 use cinline::*;
 use std::ffi::*;
@@ -14,6 +15,7 @@ mod bindings;
 use bindings::*;
 cinclude! {
     #include "box64dl_cinclude.h"
+    typedef struct Xmm { uint64_t lo; uint64_t hi; } Xmm;
 }
 
 fn thread_init() -> Result<()> {
@@ -138,5 +140,201 @@ unsafe extern "C" fn box64dl_close(handle: *mut c_void) -> c_int {
             return -1;
         }
         my_dlclose(emu, handle)
+    }
+}
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct Xmm {
+    pub lo: u64,
+    pub hi: u64,
+}
+fn align_down(x: u64, align: u64) -> u64 {
+    x & !(align - 1)
+}
+
+fn is_xmm(r: Register) -> bool {
+    (r as u32) >= (Register::Xmm0 as u32)
+}
+
+cmod! {
+    void write_reg(x64emu_t* emu, uint32_t r, uint64_t v) {
+        emu->regs[r].q[0] = v;
+    }
+    uint64_t read_reg(x64emu_t* emu, uint32_t r) {
+        return emu->regs[r].q[0];
+    }
+    void write_xmm(x64emu_t* emu, uint32_t r, Xmm x) {
+        uint32_t i = r - 10;
+        emu->xmm[i].q[0] = x.lo;
+        emu->xmm[i].q[1] = x.hi;
+    }
+    Xmm read_xmm(x64emu_t* emu, uint32_t r) {
+        uint32_t i = r - 10;
+        Xmm x = { emu->xmm[i].q[0], emu->xmm[i].q[1] };
+        return x;
+    }
+}
+
+unsafe extern "C" {
+    fn write_reg(emu: *mut x64emu_t, r: Register, v: u64);
+    fn read_reg(emu: *mut x64emu_t, r: Register) -> u64;
+    fn write_xmm(emu: *mut x64emu_t, r: Register, x: Xmm);
+    fn read_xmm(emu: *mut x64emu_t, r: Register) -> Xmm;
+}
+
+unsafe fn write_place(emu: *mut x64emu_t, sp: u64, place: &Place, src: *const u8) {
+    unsafe {
+        match place.alloc {
+            Allocation::Void => {}
+            Allocation::Stack { offset } => {
+                // 直接拷贝
+                std::ptr::copy_nonoverlapping(src, (sp as usize + offset) as *mut u8, place.size);
+            }
+            Allocation::Reg { regs: r, len } => {
+                let mut v = [0u64; 2];
+                std::ptr::copy_nonoverlapping(src, v.as_mut_ptr().cast(), place.size);
+                for k in 0..len as usize {
+                    if is_xmm(r[k]) {
+                        // 暂不支持16字节全塞到一个xmm的类型
+                        assert!(place.size <= 8 * len as usize);
+                        write_xmm(emu, r[k], Xmm { lo: v[k], hi: 0 });
+                    } else {
+                        write_reg(emu, r[k], v[k]);
+                    }
+                }
+            }
+            Allocation::Sret => unreachable!("args layout cannot be sret"),
+        }
+    }
+}
+
+unsafe fn read_place(emu: *mut x64emu_t, place: &Place, dst: *mut u8) {
+    unsafe {
+        match place.alloc {
+            Allocation::Void => {}
+            Allocation::Reg { regs: r, len } => {
+                assert!(place.size <= 16 && (len == 1 || len == 2));
+                let mut v = [0u64; 2];
+                for k in 0..len as usize {
+                    if is_xmm(r[k]) {
+                        assert!(place.size <= 8 * len as usize);
+                        v[k] = read_xmm(emu, r[k]).lo;
+                    } else {
+                        v[k] = read_reg(emu, r[k]);
+                    }
+                }
+                std::ptr::copy_nonoverlapping(v.as_ptr().cast(), dst, place.size);
+            }
+            Allocation::Sret => todo!("sret return"),
+            Allocation::Stack { .. } => unreachable!("return layout cannot be stack"),
+        }
+    }
+}
+
+// args_val: void**，每项指向一个参数值；ret_val: 指向返回值缓冲区
+fn call_plan(func: *mut c_void, plan: &CallPlan, args_val: *mut c_void, ret_val: *mut c_void) -> i32 {
+    let emu = unsafe { thread_get_emu() };
+    if emu.is_null() || func.is_null() {
+        return -1;
+    }
+    let args = if plan.args_len == 0 {
+        &[][..]
+    } else {
+        unsafe { core::slice::from_raw_parts(plan.args, plan.args_len) }
+    };
+    let vals = args_val as *const *const u8;
+
+    unsafe {
+        let old_sp = read_reg(emu, Register::Rsp);
+        // 栈向下增长，16字节对齐
+        let sp = align_down(old_sp - plan.stack_size as u64, 16);
+        write_reg(emu, Register::Rsp, sp);
+
+        for (i, arg) in args.iter().enumerate() {
+            write_place(emu, sp, arg, *vals.add(i));
+        }
+        DynaCall(emu, func as usize, 0);
+        write_reg(emu, Register::Rsp, old_sp);
+
+        read_place(emu, &plan.ret, ret_val.cast());
+    }
+    0
+}
+// 运行时调用，性能较差
+// 使用类似ffi的接口
+#[unsafe(no_mangle)]
+unsafe extern "C" fn box64dl_call_runtime(
+    func: *mut c_void,
+    args: CFunc,
+    args_val: *mut c_void,
+    ret_val: *mut c_void,
+) -> i32 {
+    let mut plan:CallPlan=unsafe{std::mem::zeroed()};
+    let status=abi_plan_gen(args,&mut plan);
+    if status!=0{
+        return status;
+    }
+    call_plan(func,&plan,args_val,ret_val)
+}
+
+// 这是对“call” 这个操作的最小包装
+// 你需要通过某种方式设置args，并取得返回值，借助abi-plan做代码生成是一个好想法
+// 在直接操作寄存器的情况下，这应该是最优的.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn box64dl_call(func: *mut c_void) -> i32 {
+    unsafe {
+        let emu = thread_get_emu();
+        if emu.is_null() || func.is_null() {
+            return -1;
+        }
+        DynaCall(emu, func as usize, 0);
+        0
+    }
+}
+
+// 下面三个函数用于代码生成时直接操作状态
+
+// 获取通用寄存器堆 (reg64_t regs[16])
+#[unsafe(no_mangle)]
+unsafe extern "C" fn box64dl_get_thread_reg() -> *mut u64 {
+    unsafe {
+        let emu = thread_get_emu();
+        if emu.is_null() {
+            return std::ptr::null_mut();
+        }
+        let p = c! { (emu: *mut x64emu_t) -> *mut u64
+            return (u64*)emu->regs;
+        };
+        p
+    }
+}
+
+// 获取xmm寄存器堆 (sse_regs_t xmm[16])
+#[unsafe(no_mangle)]
+unsafe extern "C" fn box64dl_get_thread_reg_xmm() -> *mut Xmm {
+    unsafe {
+        let emu = thread_get_emu();
+        if emu.is_null() {
+            return std::ptr::null_mut();
+        }
+        let p = c! { (emu: *mut x64emu_t) -> usize
+            return (uintptr_t)emu->xmm;
+        };
+        p as *mut Xmm
+    }
+}
+
+// 获取栈基址 (emu->init_stack；压栈直接用 regs[_SP] 即可)
+#[unsafe(no_mangle)]
+unsafe extern "C" fn box64dl_get_thread_stack() -> *mut c_void {
+    unsafe {
+        let emu = thread_get_emu();
+        if emu.is_null() {
+            return std::ptr::null_mut();
+        }
+        let p = c! { (emu: *mut x64emu_t) -> usize
+            return (uintptr_t)emu->init_stack;
+        };
+        p as *mut c_void
     }
 }

@@ -5,13 +5,16 @@ version = 4
 [[package]]
 name = "abi-plan"
 version = "0.1.0"
-source = "git+https://github.com/Shyliuli/abi-plan.git#9ee92b8f015fcaea2cb3665d496403ac721ec6c7"
+source = "git+https://github.com/Shyliuli/abi-plan.git#922f4a4e6a64e98fc7557e6e01f58d337ec8bd42"
+dependencies = [
+ "anyhow",
+]
 
 [[package]]
 name = "anyhow"
-version = "1.0.104"
+version = "1.0.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
 
 [[package]]
 name = "cc"
