@@ -31,10 +31,15 @@ cargo run-test --release
 ```
 
 Patches in `patch/` are applied in filename order to a temporary copy of the pinned box64 submodule. `third_party/box64` is not modified.
-
-## WIP
+## Finished
 - Library-mode initialization path
-
+- int,float,double,pointer
+- call from C
+- the ability of generating C stub(not fully generator)
+## WIP
+- struct,union,array,enum
+- function pointer(call)
+- function pointer(callback)
+- JIT support
 ## Goal
 - `dlopen` / `dlsym` / `dlclose` style API for x64 shared libraries
-m
