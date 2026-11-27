@@ -274,12 +274,25 @@ unsafe extern "C" fn box64dl_call_runtime(
     if status!=0{
         return status;
     }
+    // FIXME: 调用完需释放 plan.args (free_plan)，且高频调用应将 plan 预生成与执行拆开
     call_plan(func,&plan,args_val,ret_val)
 }
-
-// 这是对“call” 这个操作的最小包装
-// 你需要通过某种方式设置args，并取得返回值，借助abi-plan做代码生成是一个好想法
-// 在直接操作寄存器的情况下，这应该是最优的.
+// JIT路径看起来会非常美妙，但是要等abi-plan全做好了....
+//
+// TODO: 实现 trait 化，使 call_plan 流程可复用于三个后端：
+//   - Exec: 直接执行寄存器/栈操作
+//   - CCodegen: 生成 C 桩代码
+//   - Emit: 生成内存中的 host 机器码
+//
+// TODO: CCodegen 后端 (AOT 路径)
+//   输入 C 签名，编译时跑 X64Plan，输出操作 box64 状态的 C 桩函数，交给 C 编译器与主程序一起编译。
+//
+// TODO: Emit 后端 (JIT 路径，待 abi-plan 完成 LoongArch 等 HostPlan 后实现)
+//   以 CFunc 或类型字符串为哈希查表，在内存中生成桩函数的 host 机器码：
+//   1. 用 HostPlan 生成从宿主函数调用中取得参数的机器码（CCodegen 中这一步由 host C 编译器完成，
+//      运行时无编译器参与故需 HostPlan；）；
+//   2. 用 X64Plan 生成与 CCodegen 一致的修改 box64 寄存器/栈状态的机器码；
+//   3. 调用 DynaCall，再按 X64Plan -> HostPlan 取回返回值。
 #[unsafe(no_mangle)]
 unsafe extern "C" fn box64dl_call(func: *mut c_void) -> i32 {
     unsafe {
