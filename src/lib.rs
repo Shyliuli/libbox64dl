@@ -80,6 +80,9 @@ fn global_init() -> i32 {
         c! {
             long pagesize = sysconf(_SC_PAGESIZE);
             box64_pagesize = pagesize > 0 ? pagesize : 4096;
+            setenv("BOX64_NOBANNER", "1", 0);
+            setenv("BOX64_LOG", "0", 0);
+            setenv("BOX64_NORCFILES", "1", 0);
         };
         LoadEnvVariables();
         //在这个函数内部已经调用了InitAllHelpers

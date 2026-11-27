@@ -1,5 +1,6 @@
 /*用于c! 需要获取结构体内部字段*/
 #include "box64dl_bindgen.h"
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "auxval.h"
